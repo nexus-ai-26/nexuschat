@@ -1,12 +1,14 @@
 import logging
-from typing import Annotated, Dict, Any
+from typing import Annotated, Any
+
 from fastapi import APIRouter, Depends
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from config import Settings
-from whatsapp import WhatsAppClient
 from summarize_and_send_to_groups import summarize_and_send_to_groups
-from .deps import get_db_async_session, get_whatsapp, get_settings
+from whatsapp import WhatsAppClient
+
+from .deps import get_db_async_session, get_whatsapp, require_ai_enabled
 
 # Create router for send summaries to groups endpoints
 router = APIRouter()
@@ -19,8 +21,8 @@ logger = logging.getLogger(__name__)
 async def trigger_summarize_and_send_to_groups(
     session: Annotated[AsyncSession, Depends(get_db_async_session)],
     whatsapp: Annotated[WhatsAppClient, Depends(get_whatsapp)],
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> Dict[str, Any]:
+    settings: Annotated[Settings, Depends(require_ai_enabled)],
+) -> dict[str, Any]:
     """
     Trigger a send summaries to groups sync for all managed groups.
 
@@ -48,6 +50,6 @@ async def trigger_summarize_and_send_to_groups(
         }
 
     except Exception as e:
-        logger.error(f"Error during send summaries to groups sync: {str(e)}")
+        logger.error(f"Error during send summaries to groups sync: {e!s}")
         # Re-raise the exception to let FastAPI handle it with proper error response
         raise

@@ -1,0 +1,137 @@
+{
+  "info": {
+    "name": "NexusChat \u2014 Local backend (AI disabled)",
+    "description": "Local setup checks for NexusChat with AI_ENABLED=false. No API key required. The backend uses port 8000; GoWA uses port 3003. The two POST requests are specifically for AI-disabled mode.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "noauth"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Backend readiness",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/readiness",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "readiness"
+          ]
+        },
+        "description": "Confirms that the HTTP server is responding."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "pm.test(\"Backend is ready\", () => pm.expect(pm.response.json().status).to.eql(\"ok\"));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Database and WhatsApp health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/status",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "status"
+          ]
+        },
+        "description": "Checks PostgreSQL and the connected WhatsApp device. This does not call Gemini or test AI replies."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 200\", () => pm.response.to.have.status(200));",
+              "pm.test(\"Overall health\", () => pm.expect(pm.response.json().status).to.eql(\"healthy\"));",
+              "pm.test(\"Database connected\", () => pm.expect(pm.response.json().checks.database.status).to.eql(\"healthy\"));",
+              "pm.test(\"WhatsApp connected\", () => pm.expect(pm.response.json().checks.whatsapp.status).to.eql(\"healthy\"));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Knowledge-base ingestion is disabled",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/load_new_kbtopics",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "load_new_kbtopics"
+          ]
+        },
+        "description": "Requires AI_ENABLED=false on the backend. Expected HTTP 503 is a passing result in this setup. When AI is enabled, this endpoint performs real work; the summary endpoint can send WhatsApp messages."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 503 while AI is disabled\", () => pm.response.to.have.status(503));",
+              "pm.test(\"Clear disabled explanation\", () => pm.expect(pm.response.json().detail).to.include(\"AI features are disabled\"));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Summary sending is disabled",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/summarize_and_send_to_groups",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "summarize_and_send_to_groups"
+          ]
+        },
+        "description": "Requires AI_ENABLED=false on the backend. Expected HTTP 503 is a passing result in this setup. When AI is enabled, this endpoint performs real work; the summary endpoint can send WhatsApp messages."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"HTTP 503 while AI is disabled\", () => pm.response.to.have.status(503));",
+              "pm.test(\"Clear disabled explanation\", () => pm.expect(pm.response.json().detail).to.include(\"AI features are disabled\"));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
