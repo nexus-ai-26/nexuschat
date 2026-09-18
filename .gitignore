@@ -175,3 +175,7 @@ cython_debug/
 
 # Ignore files directory
 data/
+# Dashboard frontend exception
+# lib/ above targets Python virtual environments, not Next.js src/lib
+!dashboard/src/lib/
+!dashboard/src/lib/**
