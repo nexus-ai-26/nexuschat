@@ -23,7 +23,7 @@ jobs:
         with:
           # Configure which types are allowed (default: https://github.com/commitizen/conventional-commit-types)
           # fix, feat, docs, ci, chore, etc.
-          headerPattern: '^([A-Za-z0-9._/-]+)(?:: (.+))?$'
+          headerPattern: '^([A-Za-z0-9._-]+)(?::\s+|/)(.+)$'
           headerPatternCorrespondence: type, subject
           types: |
             .+
