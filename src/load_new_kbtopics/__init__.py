@@ -4,7 +4,6 @@ from datetime import datetime
 from typing import Dict, List
 
 from pydantic import BaseModel, Field, PrivateAttr
-from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.agent import AgentRunResult
 from sqlmodel import desc, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -22,6 +21,7 @@ from models.knowledge_base_topic import KBTopic
 from models.upsert import bulk_upsert
 from services.prompt_manager import prompt_manager
 from utils.voyage_embed_text import voyage_embed_text
+from utils.llm_provider import run_with_provider_fallback
 from whatsapp import WhatsAppClient
 
 logger = logging.getLogger(__name__)
@@ -50,16 +50,12 @@ def _deid_text(message: str, user_mapping: Dict[str, str]) -> str:
 async def conversation_splitter_agent(
     settings: Settings, content: str
 ) -> AgentRunResult[List[Topic]]:
-    agent = Agent(
-        model=settings.model_name,
-        # Set bigger then 1024 max token for this agent, because it's a long conversation
-        model_settings=ModelSettings(max_tokens=10000),
+    return await run_with_provider_fallback(
+        settings,
         system_prompt=prompt_manager.render("conversation_splitter.j2"),
+        prompt=content,
         output_type=List[Topic],
-        retries=5,
     )
-
-    return await agent.run(content)
 
 
 def _get_speaker_mapping(messages: List[Message]) -> Dict[str, str]:

@@ -1,5 +1,9 @@
 import pytest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import load_new_kbtopics
 from load_new_kbtopics import split_messages
 
 
@@ -90,3 +94,19 @@ def test_split_max_size(create_messages):
 
 def test_empty_list():
     assert split_messages([]) == []
+
+
+@pytest.mark.asyncio
+async def test_conversation_splitter_uses_provider_fallback(monkeypatch):
+    expected = SimpleNamespace(output=[])
+    fallback = AsyncMock(return_value=expected)
+    monkeypatch.setattr(load_new_kbtopics, "run_with_provider_fallback", fallback)
+    settings = SimpleNamespace(model_name="unused")
+
+    result = await load_new_kbtopics.conversation_splitter_agent(
+        settings, "conversation text"
+    )
+
+    assert result is expected
+    fallback.assert_awaited_once()
+    assert fallback.await_args.kwargs["prompt"] == "conversation text"
