@@ -1,6 +1,10 @@
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import List
+from urllib.parse import unquote, urlparse
+
+import httpx
 
 from pydantic_ai.agent import AgentRunResult
 from sqlmodel import select, desc
@@ -38,6 +42,13 @@ from utils.reply_text import clean_visible_reply
 
 # Creating an object
 logger = logging.getLogger(__name__)
+
+_FILE_REQUEST_RE = re.compile(
+    r"(?:\b(?:send|share|forward|resend|download)\b.*\b(?:file|document|pdf|guideline\w*|recording\w*)\b)"
+    r"|(?:\b(?:file|document|pdf|guideline\w*|recording\w*)\b.*\b(?:send|share|forward|resend|download)\b)",
+    re.IGNORECASE,
+)
+_MAX_FORWARD_BYTES = 25 * 1024 * 1024
 
 class KnowledgeBaseAnswers(BaseHandler):
     def __init__(
@@ -154,6 +165,9 @@ class KnowledgeBaseAnswers(BaseHandler):
             )
         else:
             recent_group_messages = []
+
+        if await self._try_forward_file(message, search_results):
+            return True
 
         # Format results for the generation agent
         formatted_topics = format_search_results_for_prompt(search_results, opt_out_map)
@@ -350,6 +364,67 @@ class KnowledgeBaseAnswers(BaseHandler):
                 )
             )
         return filtered
+
+    @staticmethod
+    def _is_file_request(text: str) -> bool:
+        return bool(_FILE_REQUEST_RE.search(text))
+
+    @staticmethod
+    def _filename_for_attachment(message: Message, reference: str) -> str:
+        attached_name = re.search(
+            r"\[\[Attached [^\]]+\]\]\s*(.+)", message.text or ""
+        )
+        candidate = attached_name.group(1).strip() if attached_name else ""
+        if not candidate:
+            candidate = unquote(urlparse(reference).path).rstrip("/").rsplit("/", 1)[-1]
+        candidate = candidate.splitlines()[0].strip()
+        candidate = re.sub(r"[^A-Za-z0-9._ -]", "_", candidate)
+        return candidate[:120] or "document"
+
+    async def _download_file_reference(self, reference: str) -> bytes | None:
+        if reference.startswith(("http://", "https://")):
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.get(reference)
+        else:
+            path = reference if reference.startswith("/") else f"/{reference}"
+            response = await self.whatsapp._get(path)
+        response.raise_for_status()
+        if len(response.content) > _MAX_FORWARD_BYTES:
+            return None
+        return response.content
+
+    async def _try_forward_file(self, message: Message, search_results) -> bool:
+        if not self._is_file_request(message.text or ""):
+            return False
+
+        for result in search_results:
+            for source_message in result.messages:
+                if not source_message.media_url:
+                    continue
+                try:
+                    file_content = await self._download_file_reference(
+                        source_message.media_url
+                    )
+                    if not file_content:
+                        logger.warning(
+                            "File forwarding skipped chat=%s reason=empty_or_too_large",
+                            message.chat_jid,
+                        )
+                        return False
+                    await self.send_file(
+                        message.chat_jid,
+                        file_content,
+                        filename=self._filename_for_attachment(
+                            source_message, source_message.media_url
+                        ),
+                    )
+                    return True
+                except Exception:
+                    logger.warning(
+                        "File forwarding failed chat=%s", message.chat_jid
+                    )
+                    return False
+        return False
 
     @staticmethod
     def _clean_auto_reply_text(text: str) -> str:

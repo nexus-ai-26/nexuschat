@@ -89,6 +89,30 @@ async def test_auto_reply_loose_match_retrieves_recent_context_and_answers():
 
 
 @pytest.mark.asyncio
+async def test_file_request_forwards_known_attachment_reference():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace(spec=Settings)
+    )
+    source_message = _message(
+        text="[[Attached Document]] hackathon-guidelines.pdf",
+        media_url="statics/media/hackathon-guidelines.pdf",
+    )
+    result = _result(0.1)
+    result.messages = [source_message]
+    handler._download_file_reference = AsyncMock(return_value=b"pdf-bytes")
+    handler.send_file = AsyncMock()
+
+    forwarded = await handler._try_forward_file(
+        _message(text="Please send the guidelines PDF"), [result]
+    )
+
+    assert forwarded is True
+    handler.send_file.assert_awaited_once_with(
+        "group@g.us", b"pdf-bytes", filename="hackathon-guidelines.pdf"
+    )
+
+
+@pytest.mark.asyncio
 async def test_auto_reply_confident_match_uses_normal_context_path():
     session = AsyncSessionMock()
     session.exec = AsyncMock(return_value=_empty_result())

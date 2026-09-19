@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import load_new_kbtopics
 from load_new_kbtopics import split_messages
+from models import Message
 
 
 # Mock Message class since strictly typed object creation might be complex depending on deps
@@ -110,3 +111,19 @@ async def test_conversation_splitter_uses_provider_fallback(monkeypatch):
     assert result is expected
     fallback.assert_awaited_once()
     assert fallback.await_args.kwargs["prompt"] == "conversation text"
+
+
+def test_message_content_for_ingestion_preserves_caption_url_and_attachment():
+    message = Message(
+        message_id="attachment-1",
+        chat_jid="group@g.us",
+        group_jid="group@g.us",
+        sender_jid="user@s.whatsapp.net",
+        text="Session recording https://youtu.be/example",
+        media_url="statics/media/guide.pdf",
+    )
+
+    content = load_new_kbtopics.message_content_for_ingestion(message)
+
+    assert "https://youtu.be/example" in content
+    assert "Attachment reference: statics/media/guide.pdf" in content

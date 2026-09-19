@@ -292,7 +292,14 @@ def format_search_results_for_prompt(
         if result.messages:
             message_texts = []
             for msg in result.messages:
-                if msg.text:
+                message_content = msg.text or ""
+                if msg.media_url:
+                    message_content = (
+                        f"{message_content}\nAttachment reference: {msg.media_url}"
+                        if message_content
+                        else f"Attachment reference: {msg.media_url}"
+                    )
+                if message_content:
                     source_number += 1
                     sender = (
                         msg.sender_jid.split("@")[0] if msg.sender_jid else "Unknown"
@@ -301,7 +308,7 @@ def format_search_results_for_prompt(
                         sender = opt_out_map.get(sender, f"@{sender}")
                     timestamp = msg.timestamp.strftime("%Y-%m-%d %H:%M UTC")
                     message_texts.append(
-                        f"- [{source_number}] {sender} ({timestamp}): {msg.text[:400]}"
+                        f"- [{source_number}] {sender} ({timestamp}): {message_content[:400]}"
                     )
 
             if message_texts:

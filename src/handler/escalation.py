@@ -21,6 +21,12 @@ ESCALATION_OFFER = (
 )
 _PENDING_TTL = timedelta(minutes=15)
 _pending: dict[str, "PendingEscalation"] = {}
+_ESCALATION_STATUS_RE = re.compile(
+    r"(?:\b(?:have|has|did|was|is|are|do|does)\b.*\b(?:escalat\w*|flag\w*)\b)"
+    r"|(?:\b(?:escalat\w*|flag\w*)\b.*\b(?:sent|gone|through|done|status|happen|receive)\b)"
+    r"|\b(?:did that get sent|was this flagged|did this get flagged)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -51,19 +57,20 @@ def is_escalation_confirmation(text: str | None) -> bool:
         return False
     normalized = re.sub(r"[^a-z0-9 ]", " ", text.casefold())
     normalized = " ".join(normalized.split())
-    return normalized in {
-        "yes",
-        "y",
-        "please",
-        "please do",
-        "go ahead",
-        "yes please",
-        "sure",
-        "okay",
-        "ok",
-        "do it",
-        "flag it",
-    }
+    return any(
+        re.search(pattern, normalized)
+        for pattern in (
+            r"\byes\b",
+            r"\byeah\b",
+            r"\byep\b",
+            r"\bsure\b",
+            r"\bok(?:ay)?\b",
+            r"\bplease\b",
+            r"\bgo ahead\b",
+            r"\bdo it\b",
+            r"\bflag it\b",
+        )
+    )
 
 
 def is_escalation_decline(text: str | None) -> bool:
@@ -71,7 +78,21 @@ def is_escalation_decline(text: str | None) -> bool:
         return False
     normalized = re.sub(r"[^a-z0-9 ]", " ", text.casefold())
     normalized = " ".join(normalized.split())
-    return normalized in {"no", "n", "no thanks", "not now", "cancel"}
+    return any(
+        re.search(pattern, normalized)
+        for pattern in (
+            r"\bno\b",
+            r"\bnah\b",
+            r"\bnot now\b",
+            r"\bcancel\b",
+            r"\bdon t\b",
+            r"\bdont\b",
+        )
+    )
+
+
+def is_escalation_status_question(text: str | None) -> bool:
+    return bool(text and _ESCALATION_STATUS_RE.search(text))
 
 
 def _group_label(message: Message) -> str:
@@ -107,6 +128,14 @@ def reset_pending_escalations() -> None:
     _pending.clear()
 
 
+def pending_status_message(message: Message) -> str:
+    _prune_pending(datetime.now(timezone.utc))
+    pending = _pending.get(message.chat_jid)
+    if pending is not None and pending.sender_jid == message.sender_jid:
+        return "The organizer flag is still waiting for your confirmation; it has not been sent yet."
+    return "There is no open escalation for you right now."
+
+
 async def handle_pending_confirmation(
     handler: BaseHandler, message: Message
 ) -> bool:
@@ -121,7 +150,8 @@ async def handle_pending_confirmation(
         await handler.send_message(message.chat_jid, "Okay — I won't flag it.")
         return True
     if not is_escalation_confirmation(message.text):
-        return False
+        await handler.send_message(message.chat_jid, ESCALATION_OFFER)
+        return True
 
     _pending.pop(message.chat_jid, None)
     settings = handler.settings

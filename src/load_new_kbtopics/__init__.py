@@ -41,6 +41,14 @@ def _deid_text(message: str, user_mapping: Dict[str, str]) -> str:
     return message
 
 
+def message_content_for_ingestion(message: Message) -> str:
+    """Preserve text, captions, URLs, and attachment references for indexing."""
+    parts = [message.text] if message.text else []
+    if message.media_url:
+        parts.append(f"Attachment reference: {message.media_url}")
+    return "\n".join(parts)
+
+
 @retry(
     wait=wait_random_exponential(min=5, max=90, multiplier=1.5),
     stop=stop_after_attempt(6),
@@ -177,9 +185,10 @@ async def get_conversation_topics(
     # Swap tags in message to user tags E.G. "@972536150150 please comment" to "@user_1 please comment"
     conversation_content = "\n".join(
         [
-            f"{message.timestamp}: @{speaker_mapping[message.sender_jid]}: {_deid_text(message.text, speaker_mapping)}"
+            f"{message.timestamp}: @{speaker_mapping[message.sender_jid]}: "
+            f"{_deid_text(message_content_for_ingestion(message), speaker_mapping)}"
             for message in messages
-            if message.text is not None
+            if message_content_for_ingestion(message)
         ]
     )
 

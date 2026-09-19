@@ -14,7 +14,7 @@ from models import (
     Reaction,
     upsert,
 )
-from whatsapp import WhatsAppClient, SendMessageRequest
+from whatsapp import WhatsAppClient, SendFileRequest, SendMessageRequest
 from whatsapp.jid import normalize_jid
 from utils.reply_text import clean_visible_reply
 
@@ -62,8 +62,8 @@ class BaseHandler:
         if isinstance(message, BaseMessage):
             message = Message(**message.model_dump())
 
-        if not message.text:
-            return message  # Don't store messages without text
+        if not message.text and not message.media_url:
+            return message  # Don't store messages without text or media
 
         async with self.session.begin_nested():
             # Ensure sender exists and is committed
@@ -181,6 +181,30 @@ class BaseHandler:
         stored_message = await self.store_message(Message(**new_message.model_dump()))
         assert stored_message, "Failed to store message"
         return stored_message
+
+    async def send_file(
+        self,
+        to_jid: str,
+        file_content: bytes,
+        *,
+        filename: str = "file",
+        caption: str | None = None,
+    ):
+        """Forward a known attachment through the GoWA file endpoint."""
+        assert to_jid, "to_jid is required"
+        assert file_content, "file_content is required"
+        response = await self.whatsapp.send_file(
+            SendFileRequest(
+                phone=normalize_jid(to_jid),
+                caption=caption,
+                is_forwarded=True,
+            ),
+            file_content,
+            filename=filename,
+        )
+        assert response.results, "Failed to send file"
+        logger.info("File forwarded to chat=%s filename=%s", to_jid, filename)
+        return response
 
     async def upsert(self, model):
         return await upsert(self.session, model)

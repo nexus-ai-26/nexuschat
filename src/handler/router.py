@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Sequence
 from datetime import datetime, timedelta
 from enum import Enum
@@ -24,6 +25,18 @@ from .auto_reply import is_clear_banter
 
 # Creating an object
 logger = logging.getLogger(__name__)
+
+
+_CONTENT_QUESTION_RE = re.compile(
+    r"\b(?:quel|quelle|quels|quelles|quand|comment|pourquoi|qui|quoi|"
+    r"pouvez|peut|aidez|svp|inscription)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_content_question(text: str) -> bool:
+    """Keep multilingual content questions out of the generic intent fallback."""
+    return "?" in text or bool(_CONTENT_QUESTION_RE.search(text))
 
 
 class IntentEnum(str, Enum):
@@ -66,6 +79,10 @@ class Router(BaseHandler):
                 message.chat_jid,
                 "😄 I’m filing that under *excellent banter*. Ask me a real question when you’re ready!",
             )
+            return
+
+        if _looks_like_content_question(message.text):
+            await self.ask_knowledge_base(message)
             return
 
         route = await self._route(message.text)

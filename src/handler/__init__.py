@@ -21,7 +21,9 @@ from .auto_reply import (
 from .escalation import (
     handle_pending_confirmation,
     is_human_request,
+    is_escalation_status_question,
     offer_escalation,
+    pending_status_message,
 )
 from urllib.parse import urlparse
 import re
@@ -82,6 +84,10 @@ class MessageHandler(BaseHandler):
         if message.sender_jid == my_jid.normalize_str():
             return
 
+        if not message.group and is_escalation_status_question(message.text):
+            await self.send_message(message.chat_jid, pending_status_message(message))
+            return
+
         if await handle_pending_confirmation(self, message):
             return
 
@@ -137,6 +143,10 @@ class MessageHandler(BaseHandler):
 
         # Explicitly enabled groups may be mention-triggered without a managed DB flag.
         if message and message.group and not message.group.managed and not auto_reply_group and not active_group:
+            return
+
+        if is_escalation_status_question(message.text):
+            await self.send_message(message.chat_jid, pending_status_message(message))
             return
 
         mentioned = message.has_mentioned(my_jid)

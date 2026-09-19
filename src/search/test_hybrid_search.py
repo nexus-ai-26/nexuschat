@@ -40,6 +40,32 @@ def test_search_prompt_labels_evidence():
     assert "The launch is planned for Friday." in prompt
 
 
+def test_search_prompt_preserves_attachment_reference():
+    topic = KBTopic(
+        id="topic_attachment",
+        group_jid="123@g.us",
+        subject="Guidelines",
+        summary="The group shared the guidelines PDF.",
+        speakers="user_1",
+        embedding=[0.1] * 1024,
+    )
+    message = Message(
+        message_id="msg_attachment",
+        chat_jid="123@g.us",
+        sender_jid="user_1@s.whatsapp.net",
+        text="The guidelines are attached.",
+        media_url="statics/media/guidelines.pdf",
+        timestamp=datetime(2026, 1, 2, 10, 30),
+        group_jid="123@g.us",
+    )
+
+    prompt = format_search_results_for_prompt(
+        [SearchResult(topic=topic, messages=[message], vector_distance=0.1)]
+    )
+
+    assert "Attachment reference: statics/media/guidelines.pdf" in prompt
+
+
 def test_response_citations_use_model_labels_and_fallback():
     topic = KBTopic(
         id="topic_citation",
