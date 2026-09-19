@@ -46,7 +46,12 @@ def test_message():
 
 @pytest.fixture
 def mock_settings():
-    return Mock(spec=Settings, model_name="test-model")
+    return Mock(
+        spec=Settings,
+        model_name="anthropic:test-model",
+        llm_provider_order="anthropic",
+        anthropic_api_key="test-anthropic-key",
+    )
 
 
 def MockAgent(return_value: Any):

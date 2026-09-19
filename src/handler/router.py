@@ -18,6 +18,7 @@ from whatsapp import WhatsAppClient
 from config import Settings
 from .base_handler import BaseHandler
 from services.prompt_manager import prompt_manager
+from utils.llm_provider import run_with_provider_fallback
 
 
 # Creating an object
@@ -71,13 +72,12 @@ class Router(BaseHandler):
                 await self.default_response(message)
 
     async def _route(self, message: str) -> IntentEnum:
-        agent = Agent(
-            model=self.settings.model_name,
+        result = await run_with_provider_fallback(
+            self.settings,
             system_prompt=prompt_manager.render("intent.j2"),
+            prompt=message,
             output_type=Intent,
         )
-
-        result = await agent.run(message)
         return result.output.intent
 
     async def summarize(self, message: Message):

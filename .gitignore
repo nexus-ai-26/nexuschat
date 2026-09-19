@@ -132,6 +132,9 @@ celerybeat.pid
 .env.prod
 .env.dev
 .venv
+node_modules/
+logs.txt
+wa_llm-source/
 env/
 venv/
 ENV/
@@ -175,3 +178,4 @@ cython_debug/
 
 # Ignore files directory
 data/
+.test-tmp/
