@@ -1,6 +1,7 @@
 Summarize the following group chat messages in a few words.
+{% include "grounding_rules.j2" %}
 
-- You MUST state that this is a summary of TODAY's messages. Even if the user asked for a summary of a different time period (in that case, state that you can only summarize today's messages)
+- Describe these as the supplied recent messages, not necessarily all of today's messages. Explain when the supplied history cannot cover the requested period.
 - Always personalize the summary to the user's request
 - Keep it short and sweet
 - Tag users when mentioning them

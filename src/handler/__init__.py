@@ -1,20 +1,21 @@
 import asyncio
 import logging
+import re
+from urllib.parse import urlparse
 
 from cachetools import TTLCache
+from gowa_sdk.webhooks import WebhookEnvelope
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
 
 from config import Settings
+from handler.kb_qa import KBQAHandler
 from handler.router import Router
 from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
-from handler.kb_qa import KBQAHandler
-from gowa_sdk.webhooks import WebhookEnvelope
-from whatsapp import WhatsAppClient
-from .base_handler import BaseHandler
 from models import Message, OptOut
-from urllib.parse import urlparse
-import re
+from whatsapp import WhatsAppClient
+
+from .base_handler import BaseHandler
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class MessageHandler(BaseHandler):
             return
 
         if message.sender_jid.endswith("@lid"):
-            logging.info(
+            logger.info(
                 f"Received message from {message.sender_jid}: {payload.model_dump_json()}"
             )
 
@@ -81,11 +82,14 @@ class MessageHandler(BaseHandler):
                 )
             return
 
+        if not self.settings.ai_enabled:
+            return
+
         # In-memory dedupe: if this message is already being processed/recently processed, skip
         if message and message.message_id:
             async with _processing_lock:
                 if message.message_id in _processing_cache:
-                    logging.info(
+                    logger.info(
                         f"Message {message.message_id} already in processing cache; skipping."
                     )
                     return

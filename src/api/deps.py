@@ -1,15 +1,27 @@
-from typing import Annotated, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from sqlmodel.ext.asyncio.session import AsyncSession
+from voyageai.client_async import AsyncClient
 
+from config import Settings, get_settings
 from handler import MessageHandler
 from whatsapp import WhatsAppClient
-from voyageai.client_async import AsyncClient
-from config import Settings, get_settings
 
 
-async def get_db_async_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
+def require_ai_enabled(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> Settings:
+    if not settings.ai_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="AI features are disabled. Configure GOOGLE_API_KEY and set AI_ENABLED=true to enable Gemini.",
+        )
+    return settings
+
+
+async def get_db_async_session(request: Request) -> AsyncGenerator[AsyncSession]:
     assert request.app.state.async_session, "AsyncSession generator not initialized"
     async with request.app.state.async_session() as session:
         try:
