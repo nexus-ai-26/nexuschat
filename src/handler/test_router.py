@@ -325,3 +325,25 @@ async def test_router_summarize_with_opt_out(
     # but here we are using a closure.
     # However, since we mocked get_opt_out_map and asserted it was called, and the code uses the result,
     # it gives us confidence.
+
+
+@pytest.mark.asyncio
+async def test_router_answers_clear_banter_without_llm(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.send_message = AsyncMock()
+    message = Message(
+        message_id="joke-1",
+        text="lol 😂",
+        chat_jid="user@s.whatsapp.net",
+        sender_jid="user@s.whatsapp.net",
+    )
+
+    await router(message)
+
+    router.send_message.assert_awaited_once()
+    assert "banter" in router.send_message.await_args.args[1]

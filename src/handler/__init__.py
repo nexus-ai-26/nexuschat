@@ -18,6 +18,11 @@ from .auto_reply import (
     auto_reply_question_rule,
     auto_reply_text_skip_reason,
 )
+from .escalation import (
+    handle_pending_confirmation,
+    is_human_request,
+    offer_escalation,
+)
 from urllib.parse import urlparse
 import re
 
@@ -60,7 +65,7 @@ class MessageHandler(BaseHandler):
         auto_reply_group = bool(group_jid and group_jid in auto_reply_groups)
 
         if auto_reply_group:
-            await self._ensure_auto_reply_group(message)
+            await self._ensure_active_group(message)
 
         if not message.text:
             if auto_reply_group:
@@ -77,6 +82,9 @@ class MessageHandler(BaseHandler):
         if message.sender_jid == my_jid.normalize_str():
             return
 
+        if await handle_pending_confirmation(self, message):
+            return
+
         # direct message
         if message and not message.group:
             command = message.text.strip().lower()
@@ -89,13 +97,10 @@ class MessageHandler(BaseHandler):
             elif command == "status":
                 await self.handle_opt_status(message)
                 return
-            # if autoreply is enabled, send autoreply
-            elif self.settings.dm_autoreply_enabled:
-                await self.send_message(
-                    message.sender_jid,
-                    self.settings.dm_autoreply_message,
-                    message.message_id,
-                )
+            if is_human_request(message.text):
+                await offer_escalation(self, message)
+                return
+            await self.router(message)
             return
 
         # In-memory dedupe: if this message is already being processed/recently processed, skip
@@ -124,11 +129,20 @@ class MessageHandler(BaseHandler):
             await self.kb_qa_handler(message)
             return
 
-        # ignore messages from unmanaged groups
-        if message and message.group and not message.group.managed and not auto_reply_group:
+        active_group = bool(
+            group_jid and group_jid in self._configured_active_groups()
+        )
+        if active_group:
+            await self._ensure_active_group(message)
+
+        # Explicitly enabled groups may be mention-triggered without a managed DB flag.
+        if message and message.group and not message.group.managed and not auto_reply_group and not active_group:
             return
 
         mentioned = message.has_mentioned(my_jid)
+        if is_human_request(message.text) and (mentioned or auto_reply_group or active_group):
+            await offer_escalation(self, message)
+            return
         if mentioned:
             await self.router(message)
             return
@@ -170,7 +184,17 @@ class MessageHandler(BaseHandler):
             if (normalized := str(value).strip())
         }
 
-    async def _ensure_auto_reply_group(self, message: Message) -> None:
+    def _configured_active_groups(self) -> set[str]:
+        configured = getattr(self.settings, "active_groups", [])
+        if isinstance(configured, str):
+            configured = configured.split(",")
+        return {
+            normalized
+            for value in configured or []
+            if (normalized := str(value).strip())
+        }
+
+    async def _ensure_active_group(self, message: Message) -> None:
         """Make configured groups eligible even if group sync has not seen them."""
         if not message.group_jid:
             return

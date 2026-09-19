@@ -6,7 +6,7 @@ from typing import Dict, List
 from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.agent import AgentRunResult
-from sqlmodel import desc, select
+from sqlmodel import desc, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from tenacity import (
     retry,
@@ -313,7 +313,13 @@ class topicsLoader:
         session: AsyncSession,
         embedding_client: AsyncClient,
         whatsapp: WhatsAppClient,
+        active_group_jids: list[str] | None = None,
     ):
-        groups = await session.exec(select(Group).where(Group.managed == True))  # noqa: E712 https://stackoverflow.com/a/18998106
+        if active_group_jids is None:
+            active_group_jids = get_settings().active_groups
+        group_filter = [Group.managed == True]  # noqa: E712
+        if active_group_jids:
+            group_filter.append(Group.group_jid.in_(active_group_jids))
+        groups = await session.exec(select(Group).where(or_(*group_filter)))
         for group in list(groups.all()):
             await self.load_topics(session, group, embedding_client, whatsapp)

@@ -1,5 +1,4 @@
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 from typing import List
 
@@ -30,18 +29,15 @@ from .auto_reply import (
     normalize_question,
 )
 from .base_handler import BaseHandler
+from .escalation import offer_escalation
 from config import Settings
 from services.prompt_manager import prompt_manager
 from utils.llm_provider import is_rate_limit_error, run_with_provider_fallback
+from utils.reply_text import clean_visible_reply
 
 
 # Creating an object
 logger = logging.getLogger(__name__)
-
-_SOURCE_LABEL_RE = re.compile(r"\[\d+\]")
-_PHONE_NUMBER_RE = re.compile(r"(?<!\w)\+?\d[\d ()-]{6,}\d(?!\w)")
-_SENTENCE_SEPARATOR_RE = re.compile(r"(?<=[.!?])\s+")
-
 
 class KnowledgeBaseAnswers(BaseHandler):
     def __init__(
@@ -71,8 +67,7 @@ class KnowledgeBaseAnswers(BaseHandler):
         my_jid = await self.whatsapp.get_my_jid()
         bot_jid = my_jid.normalize_str()
 
-        # Get the last 7 messages, excluding test-like and bot-authored context for
-        # automatic replies. Mentioned and /kb_qa paths retain their existing context.
+        # Exclude test-like, repeated, and bot-authored context on every reply path.
         stmt = (
             select(Message)
             .where(Message.chat_jid == message.chat_jid)
@@ -81,14 +76,13 @@ class KnowledgeBaseAnswers(BaseHandler):
         )
         res = await self.session.exec(stmt)
         history: list[Message] = list(res.all())
-        if auto_reply:
-            history = self._filter_auto_reply_messages(
-                history,
-                current_question=message.text,
-                current_sender=message.sender_jid,
-                group_jid=message.group_jid,
-                bot_jid=bot_jid,
-            )
+        history = self._filter_auto_reply_messages(
+            history,
+            current_question=message.text,
+            current_sender=message.sender_jid,
+            group_jid=message.group_jid,
+            bot_jid=bot_jid,
+        )
 
         # Get opt-out map
         all_jids = {m.sender_jid for m in history}
@@ -114,11 +108,7 @@ class KnowledgeBaseAnswers(BaseHandler):
                 group_jids.extend([g.group_jid for g in related_groups])
 
         # Use hybrid search to get topics with their source messages
-        from search.hybrid_search import (
-            format_citations_for_response,
-            format_search_results_for_prompt,
-            hybrid_search,
-        )
+        from search.hybrid_search import format_search_results_for_prompt, hybrid_search
 
         search_results = await hybrid_search(
             session=self.session,
@@ -128,18 +118,17 @@ class KnowledgeBaseAnswers(BaseHandler):
             vector_limit=10,
             messages_per_topic=5,
         )
-        if auto_reply:
-            search_results = self._filter_auto_reply_results(
-                search_results,
-                current_question=message.text,
-                current_sender=message.sender_jid,
-                group_jid=message.group_jid,
-                bot_jid=bot_jid,
-            )
+        search_results = self._filter_auto_reply_results(
+            search_results,
+            current_question=message.text,
+            current_sender=message.sender_jid,
+            group_jid=message.group_jid,
+            bot_jid=bot_jid,
+        )
 
-        weak_auto_reply_context = False
-        if auto_reply and not has_confident_match(search_results):
-            weak_auto_reply_context = True
+        weak_match_context = False
+        if not has_confident_match(search_results):
+            weak_match_context = True
             search_results = await hybrid_search(
                 session=self.session,
                 query=message.text,
@@ -168,7 +157,7 @@ class KnowledgeBaseAnswers(BaseHandler):
 
         # Format results for the generation agent
         formatted_topics = format_search_results_for_prompt(search_results, opt_out_map)
-        if weak_auto_reply_context and recent_group_messages:
+        if weak_match_context and recent_group_messages:
             formatted_topics += (
                 "\n\n## Last 50 group messages:\n"
                 + chat2text(recent_group_messages, opt_out_map)
@@ -187,7 +176,7 @@ class KnowledgeBaseAnswers(BaseHandler):
             history,
             opt_out_map,
             auto_reply=auto_reply,
-            weak_match=weak_auto_reply_context,
+            weak_match=weak_match_context,
         )
         logger.info(
             "RAG query completed sender=%s chat=%s retrieved_topics=%s "
@@ -199,30 +188,15 @@ class KnowledgeBaseAnswers(BaseHandler):
             similar_topics_distances,
         )
 
-        response_text = generation_result.output
-        if auto_reply:
-            response_text = self._clean_auto_reply_text(response_text)
-        if auto_reply and is_no_answer(response_text):
-            if weak_auto_reply_context:
-                response_text = (
-                    "I’m not sure based on the available context; "
-                    "an organizer will follow up."
-                )
-            else:
+        response_text = self._clean_auto_reply_text(generation_result.output)
+        if is_no_answer(response_text):
+            if auto_reply:
                 self._log_auto_reply_skip(message, "model returned NO_ANSWER")
-                return False
-
-        response = response_text
-        if not auto_reply:
-            response += format_citations_for_response(
-                search_results,
-                response_text,
-                opt_out_map,
-            )
-
+            await offer_escalation(self, message)
+            return False
         await self.send_message(
             message.chat_jid,
-            response,
+            response_text,
             # in_reply_to=message.message_id,
         )
 
@@ -379,13 +353,8 @@ class KnowledgeBaseAnswers(BaseHandler):
 
     @staticmethod
     def _clean_auto_reply_text(text: str) -> str:
-        """Remove citations, source blocks, phone numbers, and excess sentences."""
-        cleaned = re.split(r"(?i)\bsources\s*:", text, maxsplit=1)[0]
-        cleaned = _SOURCE_LABEL_RE.sub("", cleaned)
-        cleaned = _PHONE_NUMBER_RE.sub("", cleaned)
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-        sentences = _SENTENCE_SEPARATOR_RE.split(cleaned)
-        return " ".join(sentences[:3]).strip()
+        """Remove citations, source blocks, identifiers, and excess sentences."""
+        return clean_visible_reply(text, max_sentences=3)
 
     @retry(
         retry=retry_if_exception(lambda error: not is_rate_limit_error(error)),

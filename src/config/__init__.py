@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # QA test groups (group JIDs where /kb_qa command is allowed)
     qa_test_groups: Annotated[list[str], NoDecode] = []
 
+    # Groups where mention-triggered replies and KB ingestion are enabled.
+    active_groups: Annotated[list[str], NoDecode] = []
+
     # AUTO_REPLY_GROUPS is a comma-separated allowlist of group JIDs.
     auto_reply_groups: Annotated[list[str], NoDecode] = []
 
@@ -90,6 +93,8 @@ class Settings(BaseSettings):
     ]
 
     # Optional settings
+    escalation_primary_jids: Annotated[list[str], NoDecode] = []
+    escalation_secondary_jids: Annotated[list[str], NoDecode] = []
     debug: bool = False
     log_level: str = "INFO"
     logfire_token: str
@@ -114,7 +119,7 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid user JID '{jid_str}'. Missing user part.")
         return v
 
-    @field_validator("qa_test_groups")
+    @field_validator("qa_test_groups", "active_groups")
     @classmethod
     def validate_qa_test_groups(cls, v: list[str]) -> list[str]:
         """Validate that qa_test_groups contains valid group JIDs."""
@@ -137,8 +142,11 @@ class Settings(BaseSettings):
 
     @field_validator(
         "qa_test_groups",
+        "active_groups",
         "auto_reply_groups",
         "kb_exclude_subject_prefixes",
+        "escalation_primary_jids",
+        "escalation_secondary_jids",
         mode="before",
     )
     @classmethod

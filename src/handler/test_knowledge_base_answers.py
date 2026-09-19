@@ -170,3 +170,43 @@ def test_auto_reply_does_not_send_sources_or_phone_numbers():
     assert "Sources" not in cleaned
     assert "[1]" not in cleaned
     assert "+251" not in cleaned
+
+
+@pytest.mark.asyncio
+async def test_mentioned_reply_does_not_append_sources_or_identifiers():
+    session = AsyncSessionMock()
+    session.exec = AsyncMock(return_value=_empty_result())
+    whatsapp = AsyncMock()
+    whatsapp.get_my_jid = AsyncMock(
+        return_value=JID(user="bot", server="s.whatsapp.net")
+    )
+    handler = KnowledgeBaseAnswers(session, whatsapp, AsyncMock(), SimpleNamespace())
+    handler.rephrasing_agent = AsyncMock(return_value=AgentRunResult(output="schedule"))
+    handler.generation_agent = AsyncMock(
+        return_value=AgentRunResult(
+            output="*The schedule is in the announcement.* [1]\nSources:\n[1] @251911222333"
+        )
+    )
+
+    with (
+        patch(
+            "handler.knowledge_base_answers.get_opt_out_map",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "handler.knowledge_base_answers.voyage_embed_text",
+            new=AsyncMock(return_value=[[0.1] * 1024]),
+        ),
+        patch(
+            "search.hybrid_search.hybrid_search",
+            new=AsyncMock(return_value=[_result(0.2)]),
+        ),
+    ):
+        handler.send_message = AsyncMock()
+        answered = await handler(_message(), auto_reply=False)
+
+    assert answered is True
+    sent_text = handler.send_message.await_args.args[1]
+    assert "Sources" not in sent_text
+    assert "[1]" not in sent_text
+    assert "251911222333" not in sent_text

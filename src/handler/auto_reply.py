@@ -104,6 +104,16 @@ def auto_reply_text_skip_reason(text: str | None) -> str:
     return "not eligible"
 
 
+def is_clear_banter(text: str | None) -> bool:
+    """Recognize only obvious banter; ambiguous text remains on the normal path."""
+    if not text or auto_reply_question_rule(text) is not None:
+        return False
+    normalized = text.casefold().strip()
+    if any(marker in normalized for marker in ("lol", "lmao", "haha", "knock knock")):
+        return True
+    return any(emoji in text for emoji in ("😂", "🤣", "😅"))
+
+
 def is_no_answer(response: str) -> bool:
     stripped = response.strip()
     return stripped == NO_ANSWER_SENTINEL or stripped.startswith(

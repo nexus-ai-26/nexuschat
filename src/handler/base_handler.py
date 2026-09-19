@@ -16,6 +16,7 @@ from models import (
 )
 from whatsapp import WhatsAppClient, SendMessageRequest
 from whatsapp.jid import normalize_jid
+from utils.reply_text import clean_visible_reply
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,12 @@ class BaseHandler:
             return None
 
     async def send_message(
-        self, to_jid: str, message: str, in_reply_to: str | None = None
+        self,
+        to_jid: str,
+        message: str,
+        in_reply_to: str | None = None,
+        *,
+        sanitize: bool = True,
     ) -> Message:
         """
         Send a message to a JID over WhatsApp, and store the message in the database
@@ -151,11 +157,13 @@ class BaseHandler:
         assert to_jid, "to_jid is required"
         assert message, "message is required"
         to_jid = normalize_jid(to_jid)
+        visible_message = clean_visible_reply(message) if sanitize else message
+        assert visible_message, "message is empty after cleanup"
 
         resp = await self.whatsapp.send_message(
             SendMessageRequest(
                 phone=to_jid,
-                message=message,
+                message=visible_message,
                 reply_message_id=in_reply_to,
             )
         )
@@ -165,7 +173,7 @@ class BaseHandler:
         my_number = await self.whatsapp.get_my_jid()
         new_message = BaseMessage(
             message_id=sent_message_id,
-            text=message,
+            text=visible_message,
             sender_jid=str(my_number),
             chat_jid=to_jid,
             reply_to_id=in_reply_to,

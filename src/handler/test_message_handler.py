@@ -306,6 +306,28 @@ async def test_managed_group_without_mention_uses_auto_reply(
 
 
 @pytest.mark.asyncio
+async def test_active_unmanaged_group_allows_mention_only_reply(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    mock_settings.active_groups = ["g@g.us"]
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    handler.router = AsyncMock()
+    test_message = _managed_group_message(
+        "active-mention-1", "@bot What is the schedule?", managed=False
+    )
+    handler.store_message = AsyncMock(return_value=test_message)
+
+    await handler(_group_payload("active-mention-1", test_message.text or ""))
+
+    handler.router.assert_awaited_once_with(test_message)
+
+
+@pytest.mark.asyncio
 async def test_unmanaged_group_skips_auto_reply(
     mock_session: AsyncSessionMock,
     mock_whatsapp: AsyncMock,
@@ -453,7 +475,7 @@ async def test_per_user_rate_limit_is_enforced(
 
 
 @pytest.mark.asyncio
-async def test_private_chat_behavior_is_unchanged(
+async def test_private_chat_uses_the_full_router_pipeline(
     mock_session: AsyncSessionMock,
     mock_whatsapp: AsyncMock,
     mock_embedding_client: AsyncMock,
@@ -489,5 +511,5 @@ async def test_private_chat_behavior_is_unchanged(
         )
     )
 
-    handler.router.assert_not_awaited()
+    handler.router.assert_awaited_once_with(private_message)
     mock_whatsapp.send_message.assert_not_called()

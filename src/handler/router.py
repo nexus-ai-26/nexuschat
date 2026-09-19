@@ -19,6 +19,7 @@ from config import Settings
 from .base_handler import BaseHandler
 from services.prompt_manager import prompt_manager
 from utils.llm_provider import run_with_provider_fallback
+from .auto_reply import is_clear_banter
 
 
 # Creating an object
@@ -58,6 +59,13 @@ class Router(BaseHandler):
 
     async def __call__(self, message: Message):
         if not message.text:
+            return
+
+        if is_clear_banter(message.text):
+            await self.send_message(
+                message.chat_jid,
+                "😄 I’m filing that under *excellent banter*. Ask me a real question when you’re ready!",
+            )
             return
 
         route = await self._route(message.text)
