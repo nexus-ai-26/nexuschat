@@ -135,14 +135,18 @@ class MessageHandler(BaseHandler):
             await self.kb_qa_handler(message)
             return
 
-        active_group = bool(
-            group_jid and group_jid in self._configured_active_groups()
-        )
+        active_group = bool(group_jid and group_jid in self._configured_active_groups())
         if active_group:
             await self._ensure_active_group(message)
 
         # Explicitly enabled groups may be mention-triggered without a managed DB flag.
-        if message and message.group and not message.group.managed and not auto_reply_group and not active_group:
+        if (
+            message
+            and message.group
+            and not message.group.managed
+            and not auto_reply_group
+            and not active_group
+        ):
             return
 
         if is_escalation_status_question(message.text):
@@ -150,7 +154,9 @@ class MessageHandler(BaseHandler):
             return
 
         mentioned = message.has_mentioned(my_jid)
-        if is_human_request(message.text) and (mentioned or auto_reply_group or active_group):
+        if is_human_request(message.text) and (
+            mentioned or auto_reply_group or active_group
+        ):
             await offer_escalation(self, message)
             return
         if mentioned:
@@ -211,9 +217,7 @@ class MessageHandler(BaseHandler):
         if message.group is None:
             group = await self.session.get(Group, message.group_jid)
             if group is None:
-                group = Group(
-                    **BaseGroup(group_jid=message.group_jid).model_dump()
-                )
+                group = Group(**BaseGroup(group_jid=message.group_jid).model_dump())
                 await self.upsert(group)
                 await self.session.flush()
             message.group = group
@@ -221,8 +225,10 @@ class MessageHandler(BaseHandler):
     @staticmethod
     def _payload_from_me(payload: WebhookEnvelope) -> bool:
         value = payload.payload.get("from_me", payload.payload.get("fromMe", False))
-        return value is True or value == 1 or (
-            isinstance(value, str) and value.strip().casefold() == "true"
+        return (
+            value is True
+            or value == 1
+            or (isinstance(value, str) and value.strip().casefold() == "true")
         )
 
     @staticmethod

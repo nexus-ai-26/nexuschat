@@ -48,7 +48,9 @@ def is_human_request(text: str | None) -> bool:
             r"\b(?:need|want|speak|talk|connect|contact|reach)\b.*\b(?:human|person|organizer|admin|organiser)\b",
             normalized,
         )
-        or re.search(r"\b(?:human|organizer|organiser|admin)\s+(?:please|help)\b", normalized)
+        or re.search(
+            r"\b(?:human|organizer|organiser|admin)\s+(?:please|help)\b", normalized
+        )
     )
 
 
@@ -136,9 +138,7 @@ def pending_status_message(message: Message) -> str:
     return "There is no open escalation for you right now."
 
 
-async def handle_pending_confirmation(
-    handler: BaseHandler, message: Message
-) -> bool:
+async def handle_pending_confirmation(handler: BaseHandler, message: Message) -> bool:
     now = datetime.now(timezone.utc)
     _prune_pending(now)
     pending = _pending.get(message.chat_jid)
@@ -157,7 +157,9 @@ async def handle_pending_confirmation(
     settings = handler.settings
     targets = list(getattr(settings, "escalation_primary_jids", []) or [])
     targets.extend(getattr(settings, "escalation_secondary_jids", []) or [])
-    targets = list(dict.fromkeys(str(target).strip() for target in targets if str(target).strip()))
+    targets = list(
+        dict.fromkeys(str(target).strip() for target in targets if str(target).strip())
+    )
     if not targets:
         logger.warning(
             "Escalation requested but ESCALATION_PRIMARY_JIDS and "
@@ -184,9 +186,13 @@ async def handle_pending_confirmation(
             logger.exception("Escalation delivery failed for configured target")
 
     if delivered:
-        await handler.send_message(message.chat_jid, "It has been flagged to an organizer.")
+        await handler.send_message(
+            message.chat_jid, "It has been flagged to an organizer."
+        )
     else:
-        logger.warning("Escalation requested but no configured target accepted the flag")
+        logger.warning(
+            "Escalation requested but no configured target accepted the flag"
+        )
         await handler.send_message(
             message.chat_jid,
             "I couldn't flag it because the organizer contacts did not accept the message.",

@@ -243,7 +243,9 @@ def _group_payload(
     )
 
 
-def _managed_group_message(message_id: str, text: str, *, managed: bool = True) -> Message:
+def _managed_group_message(
+    message_id: str, text: str, *, managed: bool = True
+) -> Message:
     group = Group(group_jid="g@g.us", group_name="test", managed=managed)
     message = Message(
         message_id=message_id,

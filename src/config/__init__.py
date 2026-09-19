@@ -88,9 +88,7 @@ class Settings(BaseSettings):
     auto_reply_groups: Annotated[list[str], NoDecode] = []
 
     # Subject prefixes used to keep known test topics out of automatic context.
-    kb_exclude_subject_prefixes: Annotated[list[str], NoDecode] = [
-        "Hackathon inquiry"
-    ]
+    kb_exclude_subject_prefixes: Annotated[list[str], NoDecode] = ["Hackathon inquiry"]
 
     # Optional settings
     escalation_primary_jids: Annotated[list[str], NoDecode] = []

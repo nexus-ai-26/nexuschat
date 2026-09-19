@@ -60,7 +60,11 @@ def parse_faq(text: str) -> list[FAQEntry]:
         if not lines[0].startswith("Q:"):
             raise ValueError(f"FAQ block {block_number} must start with Q:")
         answer_line = next(
-            (index for index, line in enumerate(lines[1:], start=1) if line.startswith("A:")),
+            (
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.startswith("A:")
+            ),
             None,
         )
         if answer_line is None:
@@ -71,7 +75,9 @@ def parse_faq(text: str) -> list[FAQEntry]:
             [lines[answer_line][2:].strip(), *lines[answer_line + 1 :]]
         ).strip()
         if not question or not answer:
-            raise ValueError(f"FAQ block {block_number} has an empty question or answer")
+            raise ValueError(
+                f"FAQ block {block_number} has an empty question or answer"
+            )
         entries.append(FAQEntry(question=question, answer=answer))
 
     if not entries:
@@ -91,7 +97,9 @@ def build_topics(
     embeddings: list[list[float]],
 ) -> list[KBTopic]:
     if len(entries) != len(embeddings):
-        raise ValueError("Voyage returned a different number of embeddings than FAQ entries")
+        raise ValueError(
+            "Voyage returned a different number of embeddings than FAQ entries"
+        )
 
     return [
         KBTopic(

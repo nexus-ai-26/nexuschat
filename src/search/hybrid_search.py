@@ -352,9 +352,7 @@ def format_citations_for_response(
                 )
         else:
             source_number += 1
-            sources.append(
-                (source_number, f"_{topic.subject}:_ {topic.summary[:240]}")
-            )
+            sources.append((source_number, f"_{topic.subject}:_ {topic.summary[:240]}"))
 
     if not sources:
         return ""

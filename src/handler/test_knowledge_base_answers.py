@@ -120,7 +120,9 @@ async def test_auto_reply_confident_match_uses_normal_context_path():
     whatsapp.get_my_jid = AsyncMock(
         return_value=JID(user="bot", server="s.whatsapp.net")
     )
-    handler = KnowledgeBaseAnswers(session, whatsapp, AsyncMock(), SimpleNamespace(spec=Settings))
+    handler = KnowledgeBaseAnswers(
+        session, whatsapp, AsyncMock(), SimpleNamespace(spec=Settings)
+    )
     handler.rephrasing_agent = AsyncMock(return_value=AgentRunResult(output="schedule"))
     handler.generation_agent = AsyncMock(
         return_value=AgentRunResult(output="The schedule is in the announcement.")

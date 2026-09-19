@@ -47,9 +47,7 @@ async def test_base_handler_can_forward_a_file_via_gowa():
     whatsapp.send_file.return_value = response
     handler = BaseHandler(AsyncSessionMock(), whatsapp, AsyncMock())
 
-    await handler.send_file(
-        "user@s.whatsapp.net", b"pdf-bytes", filename="guide.pdf"
-    )
+    await handler.send_file("user@s.whatsapp.net", b"pdf-bytes", filename="guide.pdf")
 
     request, content = whatsapp.send_file.await_args.args
     assert isinstance(request, SendFileRequest)

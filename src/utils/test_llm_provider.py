@@ -144,7 +144,9 @@ async def test_circuit_breaker_skips_provider_for_subsequent_request():
         )
 
     second_fallback = AsyncMock(return_value=AgentRunResult(output="second fallback"))
-    with patch("utils.llm_provider.Agent", return_value=_Agent(second_fallback)) as agent:
+    with patch(
+        "utils.llm_provider.Agent", return_value=_Agent(second_fallback)
+    ) as agent:
         second_result = await run_with_provider_fallback(
             settings(llm_provider_order="deepseek,kimi"),
             system_prompt="system",

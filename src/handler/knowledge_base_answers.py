@@ -50,6 +50,7 @@ _FILE_REQUEST_RE = re.compile(
 )
 _MAX_FORWARD_BYTES = 25 * 1024 * 1024
 
+
 class KnowledgeBaseAnswers(BaseHandler):
     def __init__(
         self,
@@ -172,9 +173,8 @@ class KnowledgeBaseAnswers(BaseHandler):
         # Format results for the generation agent
         formatted_topics = format_search_results_for_prompt(search_results, opt_out_map)
         if weak_match_context and recent_group_messages:
-            formatted_topics += (
-                "\n\n## Last 50 group messages:\n"
-                + chat2text(recent_group_messages, opt_out_map)
+            formatted_topics += "\n\n## Last 50 group messages:\n" + chat2text(
+                recent_group_messages, opt_out_map
             )
 
         # Also prepare distances for logging
@@ -371,9 +371,7 @@ class KnowledgeBaseAnswers(BaseHandler):
 
     @staticmethod
     def _filename_for_attachment(message: Message, reference: str) -> str:
-        attached_name = re.search(
-            r"\[\[Attached [^\]]+\]\]\s*(.+)", message.text or ""
-        )
+        attached_name = re.search(r"\[\[Attached [^\]]+\]\]\s*(.+)", message.text or "")
         candidate = attached_name.group(1).strip() if attached_name else ""
         if not candidate:
             candidate = unquote(urlparse(reference).path).rstrip("/").rsplit("/", 1)[-1]
@@ -420,9 +418,7 @@ class KnowledgeBaseAnswers(BaseHandler):
                     )
                     return True
                 except Exception:
-                    logger.warning(
-                        "File forwarding failed chat=%s", message.chat_jid
-                    )
+                    logger.warning("File forwarding failed chat=%s", message.chat_jid)
                     return False
         return False
 
