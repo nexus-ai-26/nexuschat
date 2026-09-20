@@ -4,21 +4,22 @@ from datetime import datetime
 
 from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunResult
-from sqlmodel import select, desc
+from sqlmodel import desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from tenacity import (
-    retry,
-    wait_random_exponential,
-    stop_after_attempt,
     before_sleep_log,
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
 )
 
 from config import Settings
 from models import Group, Message
 from services.prompt_manager import prompt_manager
 from utils.chat_text import chat2text
+from utils.llm_provider import configured_model
 from utils.opt_out import get_opt_out_map
-from whatsapp import WhatsAppClient, SendMessageRequest
+from whatsapp import SendMessageRequest, WhatsAppClient
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ async def summarize(
     session: AsyncSession, settings: Settings, group_name: str, messages: list[Message]
 ) -> AgentRunResult[str]:
     agent = Agent(
-        model=settings.model_name,
+        model=configured_model(settings),
         # TODO: move to jinja?
         system_prompt=prompt_manager.render("quick_summary.j2", group_name=group_name),
         output_type=str,
@@ -95,7 +96,7 @@ async def summarize_and_send_to_group(
 async def summarize_and_send_to_groups(
     settings: Settings, session: AsyncSession, whatsapp: WhatsAppClient
 ):
-    groups = await session.exec(select(Group).where(Group.managed == True))  # noqa: E712 https://stackoverflow.com/a/18998106
+    groups = await session.exec(select(Group).where(Group.managed == True))
     tasks = [
         summarize_and_send_to_group(settings, session, whatsapp, group)
         for group in list(groups.all())
