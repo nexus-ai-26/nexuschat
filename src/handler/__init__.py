@@ -228,9 +228,9 @@ class MessageHandler(BaseHandler):
         if message.group is None:
             group = await self.session.get(Group, message.group_jid)
             if group is None:
-                group = Group(**BaseGroup(group_jid=message.group_jid).model_dump())
-                await self.upsert(group)
-                await self.session.flush()
+                group = await self.upsert(
+                    Group(**BaseGroup(group_jid=message.group_jid).model_dump())
+                )
             message.group = group
 
     @staticmethod
