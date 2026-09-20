@@ -1,11 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
 from warnings import warn
+import logging
 
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
-import logging
 import logfire
 
 from api import load_new_kbtopics_api, status, summarize_and_send_to_group_api, webhook
@@ -14,6 +14,25 @@ from config import get_settings
 from whatsapp import WhatsAppClient
 from whatsapp.init_groups import gather_groups
 from voyageai.client_async import AsyncClient
+from load_new_kbtopics import topicsLoader
+
+
+logger = logging.getLogger(__name__)
+KB_TOPIC_SYNC_INTERVAL_SECONDS = 15 * 60
+
+
+async def sync_kb_topics_periodically(async_session, embedding_client, whatsapp):
+    while True:
+        try:
+            async with async_session() as session:
+                await topicsLoader().load_topics_for_all_groups(
+                    session, embedding_client, whatsapp
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Periodic KB topic sync failed")
+        await asyncio.sleep(KB_TOPIC_SYNC_INTERVAL_SECONDS)
 
 
 @asynccontextmanager
@@ -66,9 +85,20 @@ async def lifespan(app: FastAPI):
     app.state.embedding_client = AsyncClient(
         api_key=settings.voyage_api_key, max_retries=settings.voyage_max_retries
     )
+    kb_topic_sync_task = asyncio.create_task(
+        sync_kb_topics_periodically(
+            async_session, app.state.embedding_client, app.state.whatsapp
+        )
+    )
+    logger.info(
+        "Periodic KB topic sync started interval_seconds=%s",
+        KB_TOPIC_SYNC_INTERVAL_SECONDS,
+    )
     try:
         yield
     finally:
+        kb_topic_sync_task.cancel()
+        await asyncio.gather(kb_topic_sync_task, return_exceptions=True)
         await engine.dispose()
 
 

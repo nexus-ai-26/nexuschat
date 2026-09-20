@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Sequence
 from datetime import datetime, timedelta
 from enum import Enum
@@ -18,6 +19,8 @@ from whatsapp import WhatsAppClient
 from config import Settings
 from .base_handler import BaseHandler
 from services.prompt_manager import prompt_manager
+from utils.llm_provider import run_with_provider_fallback
+from .auto_reply import is_clear_banter
 
 
 # Creating an object
@@ -31,6 +34,18 @@ NEXUS_INTRO = (
     "I can point out obvious filler such as Lorem ipsum. I can't reliably tell whether "
     "a message was AI-generated just by reading it, and I won't pretend otherwise."
 )
+
+
+_CONTENT_QUESTION_RE = re.compile(
+    r"\b(?:quel|quelle|quels|quelles|quand|comment|pourquoi|qui|quoi|"
+    r"pouvez|peut|aidez|svp|inscription)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_content_question(text: str) -> bool:
+    """Keep multilingual content questions out of the generic intent fallback."""
+    return "?" in text or bool(_CONTENT_QUESTION_RE.search(text))
 
 
 class IntentEnum(str, Enum):
@@ -68,6 +83,17 @@ class Router(BaseHandler):
         if not message.text:
             return
 
+        if is_clear_banter(message.text):
+            await self.send_message(
+                message.chat_jid,
+                "😄 I’m filing that under *excellent banter*. Ask me a real question when you’re ready!",
+            )
+            return
+
+        if _looks_like_content_question(message.text):
+            await self.ask_knowledge_base(message)
+            return
+
         route = await self._route(message.text)
         match route:
             case IntentEnum.summarize:
@@ -80,13 +106,12 @@ class Router(BaseHandler):
                 await self.default_response(message)
 
     async def _route(self, message: str) -> IntentEnum:
-        agent = Agent(
-            model=self.settings.model_name,
+        result = await run_with_provider_fallback(
+            self.settings,
             system_prompt=prompt_manager.render("intent.j2"),
+            prompt=message,
             output_type=Intent,
         )
-
-        result = await agent.run(message)
         return result.output.intent
 
     async def summarize(self, message: Message):

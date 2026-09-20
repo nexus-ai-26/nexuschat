@@ -1,5 +1,5 @@
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+ENV UV_COMPILE_BYTECODE=0 UV_LINK_MODE=copy
 
 RUN apt-get update -qy
 RUN apt-get install -qyy -o APT::Install-Recommends=false -o APT::Install-Suggests=false ca-certificates \
@@ -7,11 +7,9 @@ RUN apt-get install -qyy -o APT::Install-Recommends=false -o APT::Install-Sugges
 
 WORKDIR /app
 
-RUN --mount=type=secret,id=netrc,target=/root/.netrc,mode=0600 \
-    --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=./uv.lock,target=uv.lock \
-    --mount=type=bind,source=./pyproject.toml,target=pyproject.toml \
-    --mount=type=bind,source=./.python-version,target=.python-version \
+COPY uv.lock pyproject.toml .python-version ./
+
+RUN --mount=type=cache,id=s/f4598b4a-be3f-4a55-a0ba-2a26c86be730-/root/.cache/uv,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY . /app

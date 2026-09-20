@@ -14,8 +14,9 @@ from models import (
     Reaction,
     upsert,
 )
-from whatsapp import WhatsAppClient, SendMessageRequest
+from whatsapp import WhatsAppClient, SendFileRequest, SendMessageRequest
 from whatsapp.jid import normalize_jid
+from utils.reply_text import clean_visible_reply
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,8 @@ class BaseHandler:
         if isinstance(message, BaseMessage):
             message = Message(**message.model_dump())
 
-        if not message.text:
-            return message  # Don't store messages without text
+        if not message.text and not message.media_url:
+            return message  # Don't store messages without text or media
 
         async with self.session.begin_nested():
             # Ensure sender exists and is committed
@@ -139,7 +140,12 @@ class BaseHandler:
             return None
 
     async def send_message(
-        self, to_jid: str, message: str, in_reply_to: str | None = None
+        self,
+        to_jid: str,
+        message: str,
+        in_reply_to: str | None = None,
+        *,
+        sanitize: bool = True,
     ) -> Message:
         """
         Send a message to a JID over WhatsApp, and store the message in the database
@@ -151,11 +157,13 @@ class BaseHandler:
         assert to_jid, "to_jid is required"
         assert message, "message is required"
         to_jid = normalize_jid(to_jid)
+        visible_message = clean_visible_reply(message) if sanitize else message
+        assert visible_message, "message is empty after cleanup"
 
         resp = await self.whatsapp.send_message(
             SendMessageRequest(
                 phone=to_jid,
-                message=message,
+                message=visible_message,
                 reply_message_id=in_reply_to,
             )
         )
@@ -165,7 +173,7 @@ class BaseHandler:
         my_number = await self.whatsapp.get_my_jid()
         new_message = BaseMessage(
             message_id=sent_message_id,
-            text=message,
+            text=visible_message,
             sender_jid=str(my_number),
             chat_jid=to_jid,
             reply_to_id=in_reply_to,
@@ -173,6 +181,30 @@ class BaseHandler:
         stored_message = await self.store_message(Message(**new_message.model_dump()))
         assert stored_message, "Failed to store message"
         return stored_message
+
+    async def send_file(
+        self,
+        to_jid: str,
+        file_content: bytes,
+        *,
+        filename: str = "file",
+        caption: str | None = None,
+    ):
+        """Forward a known attachment through the GoWA file endpoint."""
+        assert to_jid, "to_jid is required"
+        assert file_content, "file_content is required"
+        response = await self.whatsapp.send_file(
+            SendFileRequest(
+                phone=normalize_jid(to_jid),
+                caption=caption,
+                is_forwarded=True,
+            ),
+            file_content,
+            filename=filename,
+        )
+        assert response.results, "Failed to send file"
+        logger.info("File forwarded to chat=%s filename=%s", to_jid, filename)
+        return response
 
     async def upsert(self, model):
         return await upsert(self.session, model)

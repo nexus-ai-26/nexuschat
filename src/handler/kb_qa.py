@@ -141,9 +141,7 @@ class KBQAHandler(BaseHandler):
             return
 
         target_group = groups[0]
-        logger.info(
-            f"QA command: querying group '{target_group.group_name}' with: {query}"
-        )
+        logger.info("QA command: querying group '%s'", target_group.group_name)
 
         # Create a synthetic message pointing to the target group
         qa_message = Message(

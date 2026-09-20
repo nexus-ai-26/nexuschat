@@ -46,7 +46,12 @@ def test_message():
 
 @pytest.fixture
 def mock_settings():
-    return Mock(spec=Settings, model_name="test-model")
+    return Mock(
+        spec=Settings,
+        model_name="anthropic:test-model",
+        llm_provider_order="anthropic",
+        anthropic_api_key="test-anthropic-key",
+    )
 
 
 def MockAgent(return_value: Any):
@@ -320,3 +325,48 @@ async def test_router_summarize_with_opt_out(
     # but here we are using a closure.
     # However, since we mocked get_opt_out_map and asserted it was called, and the code uses the result,
     # it gives us confidence.
+
+
+@pytest.mark.asyncio
+async def test_router_answers_clear_banter_without_llm(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.send_message = AsyncMock()
+    message = Message(
+        message_id="joke-1",
+        text="lol 😂",
+        chat_jid="user@s.whatsapp.net",
+        sender_jid="user@s.whatsapp.net",
+    )
+
+    await router(message)
+
+    router.send_message.assert_awaited_once()
+    assert "banter" in router.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_router_routes_french_content_question_to_knowledge_base(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.ask_knowledge_base = AsyncMock()
+    router._route = AsyncMock(return_value=IntentEnum.other)
+    message = Message(
+        message_id="french-question",
+        text="Pouvez-vous me donner le lien d'inscription au hackathon ?",
+        chat_jid="user@s.whatsapp.net",
+        sender_jid="user@s.whatsapp.net",
+    )
+
+    await router(message)
+
+    router.ask_knowledge_base.assert_awaited_once_with(message)
+    router._route.assert_not_awaited()

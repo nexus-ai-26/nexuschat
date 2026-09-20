@@ -8,6 +8,7 @@ This module provides enhanced search capabilities for the knowledge base by:
 """
 
 import logging
+import re
 from typing import List, Tuple
 from dataclasses import dataclass
 
@@ -159,6 +160,7 @@ async def hybrid_search(
     group_jids: List[str] | None = None,
     vector_limit: int = 10,
     messages_per_topic: int = 5,
+    max_vector_distance: float | None = None,
 ) -> List[SearchResult]:
     """
     Perform hybrid search combining vector similarity and keyword search.
@@ -175,6 +177,7 @@ async def hybrid_search(
         group_jids: Optional list of group JIDs to filter by
         vector_limit: Maximum number of topics from vector search
         messages_per_topic: Maximum messages to retrieve per topic
+        max_vector_distance: Optional cosine-distance cutoff for vector results
 
     Returns:
         List of SearchResult objects containing topics and their messages
@@ -183,6 +186,12 @@ async def hybrid_search(
     vector_results = await vector_search(
         session, query_embedding, group_jids, vector_limit
     )
+    if max_vector_distance is not None:
+        vector_results = [
+            (topic, distance)
+            for topic, distance in vector_results
+            if distance <= max_vector_distance
+        ]
 
     # Step 2: Keyword search for relevant messages
     keyword_messages = await keyword_search(session, query, group_jids, limit=20)
@@ -271,6 +280,7 @@ def format_search_results_for_prompt(
         return "No related topics found."
 
     formatted_parts = []
+    source_number = 0
 
     for result in results:
         topic = result.topic
@@ -278,17 +288,28 @@ def format_search_results_for_prompt(
         # Format topic header
         topic_text = f"## {topic.subject}\n{topic.summary}"
 
-        # Format associated messages if available
+        # Format associated messages with stable citation labels.
         if result.messages:
             message_texts = []
             for msg in result.messages:
-                if msg.text:
+                message_content = msg.text or ""
+                if msg.media_url:
+                    message_content = (
+                        f"{message_content}\nAttachment reference: {msg.media_url}"
+                        if message_content
+                        else f"Attachment reference: {msg.media_url}"
+                    )
+                if message_content:
+                    source_number += 1
                     sender = (
                         msg.sender_jid.split("@")[0] if msg.sender_jid else "Unknown"
                     )
                     if opt_out_map:
                         sender = opt_out_map.get(sender, f"@{sender}")
-                    message_texts.append(f"- {sender}: {msg.text[:200]}...")
+                    timestamp = msg.timestamp.strftime("%Y-%m-%d %H:%M UTC")
+                    message_texts.append(
+                        f"- [{source_number}] {sender} ({timestamp}): {message_content[:400]}"
+                    )
 
             if message_texts:
                 topic_text += "\n\n### Related Messages:\n" + "\n".join(message_texts)
@@ -296,3 +317,55 @@ def format_search_results_for_prompt(
         formatted_parts.append(topic_text)
 
     return "\n\n---\n\n".join(formatted_parts)
+
+
+def format_citations_for_response(
+    results: List[SearchResult],
+    response: str,
+    opt_out_map: dict[str, str] | None = None,
+) -> str:
+    """Append grounded source references to a generated Q&A response.
+
+    The model is asked to cite ``[n]`` labels from the prompt. If it omits
+    them, include the top three retrieved sources rather than returning an
+    apparently authoritative answer with no evidence trail.
+    """
+    sources: list[tuple[int, str]] = []
+    source_number = 0
+
+    for result in results:
+        topic = result.topic
+        if result.messages:
+            for msg in result.messages:
+                if not msg.text:
+                    continue
+                source_number += 1
+                sender = msg.sender_jid.split("@")[0] if msg.sender_jid else "Unknown"
+                if opt_out_map:
+                    sender = opt_out_map.get(sender, f"@{sender}")
+                timestamp = msg.timestamp.strftime("%Y-%m-%d")
+                sources.append(
+                    (
+                        source_number,
+                        f"_{topic.subject} — {timestamp} — {sender}:_ {msg.text[:240]}",
+                    )
+                )
+        else:
+            source_number += 1
+            sources.append((source_number, f"_{topic.subject}:_ {topic.summary[:240]}"))
+
+    if not sources:
+        return ""
+
+    cited_numbers = {
+        int(number)
+        for number in re.findall(r"\[(\d+)\]", response)
+        if int(number) <= len(sources)
+    }
+    selected = [source for source in sources if source[0] in cited_numbers]
+    if not selected:
+        selected = sources[:3]
+
+    lines = ["*Sources:*"]
+    lines.extend(f"[{number}] {description}" for number, description in selected)
+    return "\n\n" + "\n".join(lines)

@@ -4,9 +4,8 @@ from datetime import datetime
 from typing import Dict, List
 
 from pydantic import BaseModel, Field, PrivateAttr
-from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.agent import AgentRunResult
-from sqlmodel import desc, select
+from sqlmodel import desc, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from tenacity import (
     retry,
@@ -22,6 +21,7 @@ from models.knowledge_base_topic import KBTopic
 from models.upsert import bulk_upsert
 from services.prompt_manager import prompt_manager
 from utils.voyage_embed_text import voyage_embed_text
+from utils.llm_provider import run_with_provider_fallback
 from whatsapp import WhatsAppClient
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,14 @@ def _deid_text(message: str, user_mapping: Dict[str, str]) -> str:
     return message
 
 
+def message_content_for_ingestion(message: Message) -> str:
+    """Preserve text, captions, URLs, and attachment references for indexing."""
+    parts = [message.text] if message.text else []
+    if message.media_url:
+        parts.append(f"Attachment reference: {message.media_url}")
+    return "\n".join(parts)
+
+
 @retry(
     wait=wait_random_exponential(min=5, max=90, multiplier=1.5),
     stop=stop_after_attempt(6),
@@ -50,16 +58,12 @@ def _deid_text(message: str, user_mapping: Dict[str, str]) -> str:
 async def conversation_splitter_agent(
     settings: Settings, content: str
 ) -> AgentRunResult[List[Topic]]:
-    agent = Agent(
-        model=settings.model_name,
-        # Set bigger then 1024 max token for this agent, because it's a long conversation
-        model_settings=ModelSettings(max_tokens=10000),
+    return await run_with_provider_fallback(
+        settings,
         system_prompt=prompt_manager.render("conversation_splitter.j2"),
+        prompt=content,
         output_type=List[Topic],
-        retries=5,
     )
-
-    return await agent.run(content)
 
 
 def _get_speaker_mapping(messages: List[Message]) -> Dict[str, str]:
@@ -181,9 +185,10 @@ async def get_conversation_topics(
     # Swap tags in message to user tags E.G. "@972536150150 please comment" to "@user_1 please comment"
     conversation_content = "\n".join(
         [
-            f"{message.timestamp}: @{speaker_mapping[message.sender_jid]}: {_deid_text(message.text, speaker_mapping)}"
+            f"{message.timestamp}: @{speaker_mapping[message.sender_jid]}: "
+            f"{_deid_text(message_content_for_ingestion(message), speaker_mapping)}"
             for message in messages
-            if message.text is not None
+            if message_content_for_ingestion(message)
         ]
     )
 
@@ -313,7 +318,13 @@ class topicsLoader:
         session: AsyncSession,
         embedding_client: AsyncClient,
         whatsapp: WhatsAppClient,
+        active_group_jids: list[str] | None = None,
     ):
-        groups = await session.exec(select(Group).where(Group.managed == True))  # noqa: E712 https://stackoverflow.com/a/18998106
+        if active_group_jids is None:
+            active_group_jids = get_settings().active_groups
+        group_filter = [Group.managed == True]  # noqa: E712
+        if active_group_jids:
+            group_filter.append(Group.group_jid.in_(active_group_jids))
+        groups = await session.exec(select(Group).where(or_(*group_filter)))
         for group in list(groups.all()):
             await self.load_topics(session, group, embedding_client, whatsapp)
