@@ -6,8 +6,8 @@ from config import Settings
 from handler.auto_reply import auto_reply_limiter
 from handler.escalation import offer_escalation, reset_pending_escalations
 from gowa_sdk.webhooks import WebhookEnvelope
-from models import Group, Message
-from handler import MessageHandler
+from models import DMGreeting, Group, Message
+from handler import DM_OPENING, MessageHandler
 from test_utils.mock_session import AsyncSessionMock
 from whatsapp import SendMessageRequest
 from whatsapp.jid import JID
@@ -491,6 +491,7 @@ async def test_private_chat_uses_the_full_router_pipeline(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
     )
     handler.router = AsyncMock()
+    handler.send_message = AsyncMock()
 
     private_message = Message(
         message_id="private-1",
@@ -518,6 +519,52 @@ async def test_private_chat_uses_the_full_router_pipeline(
 
     handler.router.assert_awaited_once_with(private_message)
     mock_whatsapp.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_private_chat_sends_durable_opening_once_then_routes_question(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    handler.router = AsyncMock()
+    handler.send_message = AsyncMock()
+    private_message = Message(
+        message_id="private-opening-1",
+        chat_jid="opening-user@s.whatsapp.net",
+        sender_jid="opening-user@s.whatsapp.net",
+        text="What are the deadlines?",
+        timestamp=datetime.now(UTC),
+    )
+    handler.store_message = AsyncMock(return_value=private_message)
+    mock_session.get = AsyncMock(
+        side_effect=[None, DMGreeting(sender_jid=private_message.sender_jid)]
+    )
+    payload = WebhookEnvelope.model_validate(
+        {
+            "event": "message",
+            "payload": {
+                "id": private_message.message_id,
+                "chat_id": private_message.chat_jid,
+                "from": private_message.sender_jid,
+                "body": private_message.text,
+            },
+        }
+    )
+
+    await handler(payload)
+    await handler(payload)
+
+    assert handler.send_message.await_args_list[0].args == (
+        private_message.chat_jid,
+        DM_OPENING,
+    )
+    assert handler.send_message.await_count == 1
+    assert handler.router.await_count == 2
 
 
 @pytest.mark.asyncio

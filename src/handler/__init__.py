@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import re
 from urllib.parse import urlparse
@@ -24,13 +25,18 @@ from handler.escalation import (
 from handler.kb_qa import KBQAHandler
 from handler.router import Router
 from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
-from models import BaseGroup, Group, Message, OptOut
+from models import BaseGroup, DMGreeting, Group, Message, OptOut
 from services.document_ingestion import index_document
 from whatsapp import WhatsAppClient
 
 from .base_handler import BaseHandler
 
 logger = logging.getLogger(__name__)
+
+DM_OPENING = (
+    "Hi \U0001f44b I'm the UniPods METI AI programme assistant, Nexus bot. Ask me anything "
+    "about the programme sessions, deadlines, MIT, Wadhwani, links and I'll help."
+)
 
 # In-memory processing guard: 4 minutes TTL to prevent duplicate handling
 _processing_cache = TTLCache(maxsize=1000, ttl=4 * 60)
@@ -111,6 +117,7 @@ class MessageHandler(BaseHandler):
 
         # direct message
         if message and not message.group:
+            await self._send_private_opening_once(message)
             command = message.text.strip().lower()
             if command == "opt-out":
                 await self.handle_opt_out(message)
@@ -212,6 +219,17 @@ class MessageHandler(BaseHandler):
             replied = await self.router.ask_knowledge_base(message, auto_reply=True)
             if replied is True:
                 auto_reply_limiter.record(group_jid, message)
+
+    async def _send_private_opening_once(self, message: Message) -> None:
+        if await self.session.get(DMGreeting, message.sender_jid) is not None:
+            return
+        # Claim before the bridge call so a duplicate webhook cannot send a second
+        # opening while the first call is in flight.
+        result = self.session.add(DMGreeting(sender_jid=message.sender_jid))
+        if inspect.isawaitable(result):
+            await result
+        await self.session.commit()
+        await self.send_message(message.chat_jid, DM_OPENING)
 
     def _configured_auto_reply_groups(self) -> set[str]:
         configured = getattr(self.settings, "auto_reply_groups", [])

@@ -6,6 +6,7 @@ from .reaction import Reaction, BaseReaction
 from .upsert import upsert, bulk_upsert
 from .opt_out import OptOut
 from .catchup_attempt import CatchupAttempt
+from .dm_greeting import DMGreeting
 
 __all__ = [
     "Group",
@@ -22,4 +23,5 @@ __all__ = [
     "KBTopicCreate",
     "OptOut",
     "CatchupAttempt",
+    "DMGreeting",
 ]
