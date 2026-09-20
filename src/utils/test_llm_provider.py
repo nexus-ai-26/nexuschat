@@ -61,6 +61,24 @@ async def test_primary_succeeds():
 
 
 @pytest.mark.asyncio
+async def test_openai_provider_is_selected_and_uses_direct_model():
+    run = AsyncMock(return_value=AgentRunResult(output="openai response"))
+
+    with patch("utils.llm_provider.Agent", return_value=_Agent(run)) as agent:
+        result = await run_with_provider_fallback(
+            settings(
+                llm_provider_order="openai",
+                openai_api_key="openai-test-key",
+            ),
+            system_prompt="system",
+            prompt="question",
+        )
+
+    assert result.output == "openai response"
+    assert agent.call_args.kwargs["model"].model_name == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
 async def test_primary_429_falls_back_to_second():
     first = AsyncMock(side_effect=ModelHTTPError(429, "deepseek-chat"))
     second = AsyncMock(return_value=AgentRunResult(output="gemini response"))

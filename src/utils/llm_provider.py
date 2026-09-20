@@ -25,9 +25,10 @@ KIMI_MODEL = "kimi-k2-turbo-preview"
 GEMINI_MODEL = "gemini-3.6-flash"
 NVIDIA_MODEL = "openai/gpt-oss-20b"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+OPENAI_MODEL = "gpt-4o-mini"
 PROVIDER_TIMEOUT_SECONDS = 30.0
 CIRCUIT_BREAKER_SECONDS = 10 * 60
-DEFAULT_PROVIDER_ORDER = "deepseek,gemini,kimi,openrouter,nvidia,groq"
+DEFAULT_PROVIDER_ORDER = "openai,deepseek,gemini,kimi,openrouter,nvidia,groq"
 _provider_circuit_open_until: dict[str, float] = {}
 
 
@@ -117,6 +118,14 @@ def _openrouter_model(settings: Settings) -> OpenAIChatModel:
     )
 
 
+def _openai_direct_model(settings: Settings) -> OpenAIChatModel:
+    return _openai_model(
+        OPENAI_MODEL,
+        base_url="https://api.openai.com/v1",
+        api_key=settings.openai_api_key or "",
+    )
+
+
 def _deepseek_model(settings: Settings) -> OpenAIChatModel:
     return _openai_model(
         getattr(settings, "deepseek_model", DEEPSEEK_MODEL),
@@ -160,6 +169,11 @@ def _model_chain(settings: Settings) -> list[_ModelCandidate]:
     model_name = getattr(settings, "model_name", "")
     model_provider = model_name.partition(":")[0].lower()
     builders = {
+        "openai": (
+            "openai_api_key",
+            lambda: _openai_direct_model(settings),
+            lambda: f"openai:{OPENAI_MODEL}",
+        ),
         "deepseek": (
             "deepseek_api_key",
             lambda: _deepseek_model(settings),
