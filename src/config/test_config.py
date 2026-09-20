@@ -27,6 +27,7 @@ _ENV_VARS = (
     "AUTO_REPLY_GROUPS",
     "KB_EXCLUDE_SUBJECT_PREFIXES",
     "GEMINI_MODEL",
+    "LOGFIRE_SEND_TO_LOGFIRE",
 )
 
 _OPENROUTER_MODEL = "openrouter:anthropic/claude-sonnet-4.6"

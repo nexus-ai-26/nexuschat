@@ -37,7 +37,7 @@ def mock_embedding_client():
 def test_message():
     return Message(
         message_id="test_id",
-        text="Hello bot!",
+        text="Hello there!",
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
         timestamp=datetime.now(timezone.utc),
@@ -139,6 +139,7 @@ async def test_router_ask_question_route(
         SendMessageRequest(
             phone="user@s.whatsapp.net",
             message="cool response",
+            reply_message_id="test_id",
         )
     )
 
@@ -196,6 +197,7 @@ async def test_router_summarize_route(
         SendMessageRequest(
             phone="user@s.whatsapp.net",
             message="Summary of messages",
+            reply_message_id="test_id",
         )
     )
 
@@ -315,6 +317,7 @@ async def test_router_summarize_with_opt_out(
         SendMessageRequest(
             phone="user@s.whatsapp.net",
             message="Summary of messages",
+            reply_message_id="test_id",
         )
     )
 
@@ -346,7 +349,7 @@ async def test_router_answers_clear_banter_without_llm(
     await router(message)
 
     router.send_message.assert_awaited_once()
-    assert "banter" in router.send_message.await_args.args[1]
+    assert "programme materials" in router.send_message.await_args.args[1]
 
 
 @pytest.mark.asyncio

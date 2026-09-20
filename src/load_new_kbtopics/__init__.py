@@ -7,12 +7,6 @@ from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_ai.agent import AgentRunResult
 from sqlmodel import desc, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
-from tenacity import (
-    retry,
-    wait_random_exponential,
-    stop_after_attempt,
-    before_sleep_log,
-)
 from voyageai.client_async import AsyncClient
 
 from config import Settings, get_settings
@@ -49,12 +43,6 @@ def message_content_for_ingestion(message: Message) -> str:
     return "\n".join(parts)
 
 
-@retry(
-    wait=wait_random_exponential(min=5, max=90, multiplier=1.5),
-    stop=stop_after_attempt(6),
-    before_sleep=before_sleep_log(logger, logging.DEBUG),
-    reraise=True,
-)
 async def conversation_splitter_agent(
     settings: Settings, content: str
 ) -> AgentRunResult[List[Topic]]:
@@ -280,6 +268,8 @@ class topicsLoader:
             messages.sort(key=lambda m: m.timestamp)
 
             conversation_chunks = split_messages(messages)
+            # Release the read transaction before embeddings and LLM work.
+            await db_session.commit()
             logger.info(
                 f"Split {len(messages)} messages into {len(conversation_chunks)} conversation chunks for group {group.group_name}"
             )
@@ -326,5 +316,7 @@ class topicsLoader:
         if active_group_jids:
             group_filter.append(Group.group_jid.in_(active_group_jids))
         groups = await session.exec(select(Group).where(or_(*group_filter)))
-        for group in list(groups.all()):
+        group_rows = list(groups.all())
+        await session.commit()
+        for group in group_rows:
             await self.load_topics(session, group, embedding_client, whatsapp)

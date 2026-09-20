@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
 from sqlmodel import desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
@@ -33,6 +32,14 @@ NEXUS_INTRO = (
     "I only know the messages available to me, so I'll say when information is missing or uncertain.\n\n"
     "I can point out obvious filler such as Lorem ipsum. I can't reliably tell whether "
     "a message was AI-generated just by reading it, and I won't pretend otherwise."
+)
+BOT_FIXED_REPLY = (
+    "I'm Nexus, the programme-materials assistant. "
+    "I answer questions only from the programme materials."
+)
+_BOT_QUESTION_RE = re.compile(
+    r"\b(?:bot|bots|nexus|who are you|what can you do|tell me about (?:yourself|you))\b",
+    re.IGNORECASE,
 )
 
 
@@ -83,6 +90,22 @@ class Router(BaseHandler):
         if not message.text:
             return
 
+        if _BOT_QUESTION_RE.search(message.text):
+            await self.send_message(
+                message.chat_jid,
+                BOT_FIXED_REPLY,
+                in_reply_to=message.message_id,
+            )
+            return
+
+        if is_clear_banter(message.text):
+            await self.send_message(
+                message.chat_jid,
+                "Please ask a question about the programme materials.",
+                in_reply_to=message.message_id,
+            )
+            return
+
         if is_clear_banter(message.text):
             await self.send_message(
                 message.chat_jid,
@@ -130,35 +153,37 @@ class Router(BaseHandler):
         all_jids = {m.sender_jid for m in messages}
         all_jids.add(message.sender_jid)
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
-
-        agent = Agent(
-            model=self.settings.model_name,
-            system_prompt=prompt_manager.render("summarize.j2"),
-            output_type=str,
-        )
+        # The summary provider must not run while this session owns a DB connection.
+        await self.session.commit()
 
         sender_user = parse_jid(message.sender_jid).user
         sender_display = opt_out_map.get(sender_user, f"@{sender_user}")
 
-        response = await agent.run(
-            f"{sender_display}: {message.text}\n\n # History:\n {chat2text(list(messages), opt_out_map)}"
+        result = await run_with_provider_fallback(
+            self.settings,
+            system_prompt=prompt_manager.render("summarize.j2"),
+            prompt=(
+                f"{sender_display}: {message.text}\n\n # History:\n "
+                f"{chat2text(list(messages), opt_out_map)}"
+            ),
+            output_type=str,
         )
         await self.send_message(
             message.chat_jid,
-            response.output,
-            # in_reply_to=message.message_id,
+            result.output,
+            in_reply_to=message.message_id,
         )
 
     async def about(self, message):
         await self.send_message(
             message.chat_jid,
             NEXUS_INTRO,
-            # in_reply_to=message.message_id,
+            in_reply_to=message.message_id,
         )
 
     async def default_response(self, message):
         await self.send_message(
             message.chat_jid,
             "I'm sorry, but I dont think this is something I can help with right now 😅.\n I can help catch up on the chat messages or answer questions based on the group's knowledge.",
-            # in_reply_to=message.message_id,
+            in_reply_to=message.message_id,
         )

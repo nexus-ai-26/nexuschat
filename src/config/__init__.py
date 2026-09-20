@@ -100,7 +100,19 @@ class Settings(BaseSettings):
     escalation_secondary_jids: Annotated[list[str], NoDecode] = []
     debug: bool = False
     log_level: str = "INFO"
-    logfire_token: str
+    logfire_token: str | None = None
+    logfire_send_to_logfire: bool = False
+
+    # Runtime reliability limits.
+    agent_concurrency_limit: int = 4
+    background_concurrency_limit: int = 1
+    reply_deadline_seconds: float = 45.0
+    webhook_queue_maxsize: int = 100
+    provider_timeout_seconds: float = 30.0
+    provider_permanent_cooldown_seconds: float = 60 * 60
+    provider_rate_limit_cooldown_seconds: float = 60.0
+    send_retry_attempts: int = 3
+    send_retry_base_seconds: float = 0.5
 
     @field_validator("qa_testers")
     @classmethod

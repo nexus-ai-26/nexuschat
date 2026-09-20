@@ -2,16 +2,9 @@ import asyncio
 import logging
 from datetime import datetime
 
-from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunResult
 from sqlmodel import select, desc
 from sqlmodel.ext.asyncio.session import AsyncSession
-from tenacity import (
-    retry,
-    wait_random_exponential,
-    stop_after_attempt,
-    before_sleep_log,
-)
 
 from config import Settings
 from models import Group, Message
@@ -19,31 +12,25 @@ from services.prompt_manager import prompt_manager
 from utils.chat_text import chat2text
 from utils.opt_out import get_opt_out_map
 from whatsapp import WhatsAppClient, SendMessageRequest
+from utils.llm_provider import run_with_provider_fallback
 
 logger = logging.getLogger(__name__)
 
 
-@retry(
-    wait=wait_random_exponential(min=1, max=30),
-    stop=stop_after_attempt(6),
-    before_sleep=before_sleep_log(logger, logging.DEBUG),
-    reraise=True,
-)
 async def summarize(
     session: AsyncSession, settings: Settings, group_name: str, messages: list[Message]
 ) -> AgentRunResult[str]:
-    agent = Agent(
-        model=settings.model_name,
-        # TODO: move to jinja?
-        system_prompt=prompt_manager.render("quick_summary.j2", group_name=group_name),
-        output_type=str,
-    )
-
     # Get opt-out map for all senders in the history
     all_jids = {m.sender_jid for m in messages}
     opt_out_map = await get_opt_out_map(session, list(all_jids))
 
-    return await agent.run(chat2text(messages, opt_out_map))
+    await session.commit()
+    return await run_with_provider_fallback(
+        settings,
+        system_prompt=prompt_manager.render("quick_summary.j2", group_name=group_name),
+        prompt=chat2text(messages, opt_out_map),
+        output_type=str,
+    )
 
 
 async def summarize_and_send_to_group(

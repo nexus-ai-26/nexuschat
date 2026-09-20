@@ -9,13 +9,6 @@ import httpx
 from pydantic_ai.agent import AgentRunResult
 from sqlmodel import select, desc
 from sqlmodel.ext.asyncio.session import AsyncSession
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_random_exponential,
-)
 from voyageai.client_async import AsyncClient
 
 from models import Message
@@ -33,10 +26,9 @@ from .auto_reply import (
     normalize_question,
 )
 from .base_handler import BaseHandler
-from .escalation import offer_escalation
 from config import Settings
 from services.prompt_manager import prompt_manager
-from utils.llm_provider import is_rate_limit_error, run_with_provider_fallback
+from utils.llm_provider import run_with_provider_fallback
 from utils.reply_text import clean_visible_reply
 
 
@@ -49,6 +41,10 @@ _FILE_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _MAX_FORWARD_BYTES = 25 * 1024 * 1024
+NO_KB_REPLY = (
+    "I don't have that in the programme materials, so I'd rather not guess. "
+    "Please check with the organizers."
+)
 
 
 class KnowledgeBaseAnswers(BaseHandler):
@@ -100,6 +96,8 @@ class KnowledgeBaseAnswers(BaseHandler):
         all_jids = {m.sender_jid for m in history}
         all_jids.add(message.sender_jid)
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
+        # Release any DB transaction/connection before the first provider call.
+        await self.session.commit()
 
         rephrased_result = await self.rephrasing_agent(
             my_jid.user, message, history, opt_out_map
@@ -157,26 +155,14 @@ class KnowledgeBaseAnswers(BaseHandler):
                 group_jid=message.group_jid,
                 bot_jid=bot_jid,
             )
-            recent_group_messages = await self._recent_group_messages(
-                message.group_jid,
-                current_question=message.text,
-                current_sender=message.sender_jid,
-                bot_jid=bot_jid,
-                limit=50,
-            )
-        else:
-            recent_group_messages = []
+        # Search is complete; do not retain a DB connection while generating.
+        await self.session.commit()
 
         if await self._try_forward_file(message, search_results):
             return True
 
         # Format results for the generation agent
         formatted_topics = format_search_results_for_prompt(search_results, opt_out_map)
-        if weak_match_context and recent_group_messages:
-            formatted_topics += "\n\n## Last 50 group messages:\n" + chat2text(
-                recent_group_messages, opt_out_map
-            )
-
         # Also prepare distances for logging
         similar_topics_distances = [
             f"topic_distance: {r.vector_distance}" for r in search_results
@@ -206,12 +192,17 @@ class KnowledgeBaseAnswers(BaseHandler):
         if is_no_answer(response_text):
             if auto_reply:
                 self._log_auto_reply_skip(message, "model returned NO_ANSWER")
-            await offer_escalation(self, message)
-            return False
+                return False
+            await self.send_message(
+                message.chat_jid,
+                NO_KB_REPLY,
+                in_reply_to=message.message_id,
+            )
+            return True
         await self.send_message(
             message.chat_jid,
             response_text,
-            # in_reply_to=message.message_id,
+            in_reply_to=message.message_id,
         )
 
         return True
@@ -427,13 +418,6 @@ class KnowledgeBaseAnswers(BaseHandler):
         """Remove citations, source blocks, identifiers, and excess sentences."""
         return clean_visible_reply(text, max_sentences=3)
 
-    @retry(
-        retry=retry_if_exception(lambda error: not is_rate_limit_error(error)),
-        wait=wait_random_exponential(min=1, max=30),
-        stop=stop_after_attempt(6),
-        before_sleep=before_sleep_log(logger, logging.DEBUG),
-        reraise=True,
-    )
     async def generation_agent(
         self,
         query: str,
@@ -465,13 +449,6 @@ class KnowledgeBaseAnswers(BaseHandler):
             prompt=prompt_template,
         )
 
-    @retry(
-        retry=retry_if_exception(lambda error: not is_rate_limit_error(error)),
-        wait=wait_random_exponential(min=1, max=30),
-        stop=stop_after_attempt(6),
-        before_sleep=before_sleep_log(logger, logging.DEBUG),
-        reraise=True,
-    )
     async def rephrasing_agent(
         self,
         my_jid: str,

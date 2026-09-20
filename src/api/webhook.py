@@ -1,13 +1,13 @@
+import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
-from sqlmodel.ext.asyncio.session import AsyncSession
+from fastapi import APIRouter, Depends, Request
 
-from api.deps import get_db_async_session, get_handler, get_whatsapp
-from handler import MessageHandler
+from api.deps import get_whatsapp
 from gowa_sdk.webhooks import WebhookEnvelope
+from services.webhook_processing import process_group_sync, webhook_chat_key
+from services.webhook_queue import PerChatQueue
 from whatsapp import WhatsAppClient
-from whatsapp.init_groups import gather_groups
 
 # Create router for webhook endpoints
 router = APIRouter(tags=["webhook"])
@@ -22,8 +22,7 @@ def is_group_sync_event(event: str) -> bool:
 @router.post("/webhook")
 async def webhook(
     payload: WebhookEnvelope,
-    handler: Annotated[MessageHandler, Depends(get_handler)],
-    session: Annotated[AsyncSession, Depends(get_db_async_session)],
+    request: Request,
     whatsapp: Annotated[WhatsAppClient, Depends(get_whatsapp)],
 ) -> str:
     """
@@ -33,12 +32,14 @@ async def webhook(
     """
     event = payload.event.lower()
 
-    # Process message and reaction events through the message handler
+    # Queue message work after acknowledgement. The queue owns its DB session;
+    # request dependencies never remain alive across LLM or bridge calls.
     if event in MESSAGE_EVENTS:
-        await handler(payload)
+        queue: PerChatQueue[WebhookEnvelope] = request.app.state.webhook_queue
+        queue.enqueue(webhook_chat_key(payload), payload)
 
     # Keep GROUPS table in sync when group-related events happen
     if is_group_sync_event(event):
-        await gather_groups(session, whatsapp)
+        asyncio.create_task(process_group_sync(request.app, payload))
 
     return "ok"

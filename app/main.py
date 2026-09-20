@@ -1,9 +1,11 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from warnings import warn
 import logging
 
 from fastapi import FastAPI
+from gowa_sdk.webhooks import WebhookEnvelope
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 import logfire
@@ -15,19 +17,24 @@ from whatsapp import WhatsAppClient
 from whatsapp.init_groups import gather_groups
 from voyageai.client_async import AsyncClient
 from load_new_kbtopics import topicsLoader
+from services.webhook_processing import process_webhook_message
+from services.webhook_queue import PerChatQueue
 
 
 logger = logging.getLogger(__name__)
 KB_TOPIC_SYNC_INTERVAL_SECONDS = 15 * 60
 
 
-async def sync_kb_topics_periodically(async_session, embedding_client, whatsapp):
+async def sync_kb_topics_periodically(
+    async_session, embedding_client, whatsapp, background_semaphore
+):
     while True:
         try:
-            async with async_session() as session:
-                await topicsLoader().load_topics_for_all_groups(
-                    session, embedding_client, whatsapp
-                )
+            async with background_semaphore:
+                async with async_session() as session:
+                    await topicsLoader().load_topics_for_all_groups(
+                        session, embedding_client, whatsapp
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -70,24 +77,38 @@ async def lifespan(app: FastAPI):
     )
 
     async def sync_groups_on_startup() -> None:
-        async with async_session() as session:
-            try:
-                await gather_groups(session, app.state.whatsapp)
-                await session.commit()
-            except Exception:
-                await session.rollback()
-                raise
+        async with app.state.background_semaphore:
+            async with async_session() as session:
+                try:
+                    await gather_groups(session, app.state.whatsapp)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
 
-    asyncio.create_task(sync_groups_on_startup())
+    startup_groups_task = asyncio.create_task(sync_groups_on_startup())
+    app.state.startup_groups_task = startup_groups_task
 
     app.state.db_engine = engine
     app.state.async_session = async_session
+    app.state.agent_semaphore = asyncio.Semaphore(settings.agent_concurrency_limit)
+    app.state.background_semaphore = asyncio.Semaphore(
+        settings.background_concurrency_limit
+    )
+    webhook_queue: PerChatQueue[WebhookEnvelope] = PerChatQueue(
+        lambda payload: process_webhook_message(app, payload),
+        maxsize=settings.webhook_queue_maxsize,
+    )
+    app.state.webhook_queue = webhook_queue
     app.state.embedding_client = AsyncClient(
         api_key=settings.voyage_api_key, max_retries=settings.voyage_max_retries
     )
     kb_topic_sync_task = asyncio.create_task(
         sync_kb_topics_periodically(
-            async_session, app.state.embedding_client, app.state.whatsapp
+            async_session,
+            app.state.embedding_client,
+            app.state.whatsapp,
+            app.state.background_semaphore,
         )
     )
     logger.info(
@@ -97,15 +118,26 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await app.state.webhook_queue.close()
+        startup_groups_task.cancel()
+        await asyncio.gather(startup_groups_task, return_exceptions=True)
         kb_topic_sync_task.cancel()
         await asyncio.gather(kb_topic_sync_task, return_exceptions=True)
+        await app.state.whatsapp.close()
         await engine.dispose()
 
 
 # Initialize FastAPI app
 app = FastAPI(title="Webhook API", lifespan=lifespan)
 
-logfire.configure()
+# Never let an unset token make Logfire attempt an export. The explicit false
+# also prevents a stale LOGFIRE_TOKEN environment value from enabling export.
+logfire.configure(
+    send_to_logfire=(
+        os.getenv("LOGFIRE_SEND_TO_LOGFIRE", "false").strip().casefold() == "true"
+        and bool(os.getenv("LOGFIRE_TOKEN"))
+    )
+)
 logfire.instrument_pydantic_ai()
 logfire.instrument_fastapi(app)
 logfire.instrument_httpx(capture_all=True)
