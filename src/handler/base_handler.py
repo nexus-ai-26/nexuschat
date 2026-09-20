@@ -80,6 +80,9 @@ class BaseHandler:
                 await (
                     self.session.flush()
                 )  # Ensure sender is visible in this transaction
+            elif sender_pushname and sender.push_name != sender_pushname:
+                sender.push_name = sender_pushname
+                await self.session.flush()
 
             if message.group_jid:
                 group = await self.session.get(Group, message.group_jid)
@@ -147,6 +150,7 @@ class BaseHandler:
         in_reply_to: str | None = None,
         *,
         sanitize: bool = True,
+        mentions: list[str] | None = None,
     ) -> Message:
         """
         Send a message to a JID over WhatsApp, and store the message in the database
@@ -161,7 +165,9 @@ class BaseHandler:
         visible_message = clean_visible_reply(message) if sanitize else message
         assert visible_message, "message is empty after cleanup"
 
-        attempts = max(1, int(getattr(getattr(self, "settings", None), "send_retry_attempts", 3)))
+        attempts = max(
+            1, int(getattr(getattr(self, "settings", None), "send_retry_attempts", 3))
+        )
         base_delay = float(
             getattr(getattr(self, "settings", None), "send_retry_base_seconds", 0.5)
         )
@@ -172,6 +178,7 @@ class BaseHandler:
                         phone=to_jid,
                         message=visible_message,
                         reply_message_id=in_reply_to,
+                        mentions=mentions,
                     )
                 )
                 if not resp.results or not resp.results.message_id:

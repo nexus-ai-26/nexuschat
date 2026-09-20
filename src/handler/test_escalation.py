@@ -14,8 +14,10 @@ from handler.escalation import (
     offer_escalation,
     pending_status_message,
     reset_pending_escalations,
+    _received_eat,
 )
-from models import Group, Message
+from models import Group, Message, Sender
+from test_utils.mock_session import AsyncSessionMock
 
 
 def _message(text: str) -> Message:
@@ -40,7 +42,12 @@ def clear_pending():
 
 @pytest.mark.asyncio
 async def test_no_answer_offers_then_explicit_confirmation_notifies_admin():
+    session = AsyncSessionMock()
+    session.get = AsyncMock(
+        return_value=Sender(jid="254700000000@s.whatsapp.net", push_name="Amina")
+    )
     handler = SimpleNamespace(
+        session=session,
         settings=SimpleNamespace(
             escalation_primary_jids=["diana@s.whatsapp.net"],
             escalation_secondary_jids=["munira@s.whatsapp.net"],
@@ -48,11 +55,15 @@ async def test_no_answer_offers_then_explicit_confirmation_notifies_admin():
         send_message=AsyncMock(),
     )
     question = _message("What is not documented?")
+    question.sender_jid = "254700000000@s.whatsapp.net"
+    question.timestamp = datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
     await offer_escalation(handler, question)
     assert handler.send_message.await_args.args[1] == ESCALATION_OFFER
 
     confirmation = _message("yes please")
+    confirmation.sender_jid = question.sender_jid
+    confirmation.timestamp = question.timestamp
     handled = await handle_pending_confirmation(handler, confirmation)
 
     assert handled is True
@@ -60,10 +71,21 @@ async def test_no_answer_offers_then_explicit_confirmation_notifies_admin():
     admin_alert = handler.send_message.await_args_list[1]
     assert "What is not documented?" in admin_alert.args[1]
     assert "Test group" in admin_alert.args[1]
+    assert "*Organizer follow-up needed*" in admin_alert.args[1]
+    assert "*From:* Amina (254700000000)" in admin_alert.args[1]
+    assert f"*Received:* {_received_eat(question.timestamp)}" in admin_alert.args[1]
+    assert "T12:34" not in admin_alert.args[1]
     assert admin_alert.kwargs["sanitize"] is False
-    assert handler.send_message.await_args_list[-1].args[1] == (
-        "It has been flagged to an organizer."
+    group_reply = handler.send_message.await_args_list[-1]
+    assert group_reply.args[1] == (
+        "Thank you, Amina. I've passed your question to "
+        "@diana and @munira, who will contact you shortly."
     )
+    assert group_reply.kwargs["in_reply_to"] == question.message_id
+    assert group_reply.kwargs["mentions"] == [
+        "diana@s.whatsapp.net",
+        "munira@s.whatsapp.net",
+    ]
 
 
 @pytest.mark.asyncio

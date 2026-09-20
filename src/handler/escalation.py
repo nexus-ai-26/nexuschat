@@ -7,8 +7,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
-from models import Message
+from models import Message, Sender
+from whatsapp.jid import normalize_jid, parse_jid
 
 if TYPE_CHECKING:
     from .base_handler import BaseHandler
@@ -17,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ESCALATION_OFFER = (
-    "I can't answer that confidently — want me to flag this to an organizer?"
+    "I can't answer that confidently. Would you like me to flag this to an organizer?"
 )
 _PENDING_TTL = timedelta(minutes=15)
 _pending: dict[str, "PendingEscalation"] = {}
@@ -33,6 +35,8 @@ _ESCALATION_STATUS_RE = re.compile(
 class PendingEscalation:
     chat_jid: str
     sender_jid: str
+    message_id: str
+    requester_name: str
     question: str
     group_label: str
     timestamp: datetime
@@ -114,14 +118,25 @@ def _prune_pending(now: datetime) -> None:
 
 
 async def offer_escalation(handler: BaseHandler, message: Message) -> None:
-    now = datetime.now(timezone.utc)
-    _prune_pending(now)
+    timestamp = message.timestamp
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    requester_name = parse_jid(message.sender_jid).user
+    session = getattr(handler, "session", None)
+    if session is not None:
+        sender = await session.get(Sender, message.sender_jid)
+        await session.commit()
+        if sender is not None and sender.push_name and sender.push_name.strip():
+            requester_name = sender.push_name.strip()
+    _prune_pending(timestamp)
     _pending[message.chat_jid] = PendingEscalation(
         chat_jid=message.chat_jid,
         sender_jid=message.sender_jid,
+        message_id=message.message_id,
+        requester_name=requester_name,
         question=message.text or "",
         group_label=_group_label(message),
-        timestamp=now,
+        timestamp=timestamp,
     )
     await handler.send_message(message.chat_jid, ESCALATION_OFFER)
 
@@ -147,7 +162,7 @@ async def handle_pending_confirmation(handler: BaseHandler, message: Message) ->
 
     if is_escalation_decline(message.text):
         _pending.pop(message.chat_jid, None)
-        await handler.send_message(message.chat_jid, "Okay — I won't flag it.")
+        await handler.send_message(message.chat_jid, "Okay. I won't flag it.")
         return True
     if not is_escalation_confirmation(message.text):
         await handler.send_message(message.chat_jid, ESCALATION_OFFER)
@@ -171,30 +186,70 @@ async def handle_pending_confirmation(handler: BaseHandler, message: Message) ->
         )
         return True
 
+    return await _deliver_escalation(handler, message, pending, targets)
+
+
+def _organizer_label(jid: str) -> str:
+    try:
+        return parse_jid(jid).user
+    except Exception:
+        return jid.split("@", 1)[0].split(":", 1)[0]
+
+
+def _received_eat(timestamp: datetime) -> str:
+    received = timestamp.astimezone(ZoneInfo("Africa/Nairobi"))
+    day = received.strftime("%d").lstrip("0")
+    hour = received.strftime("%I").lstrip("0")
+    return f"{day} {received:%b %Y}, {hour}:{received:%M %p} (EAT)"
+
+
+async def _deliver_escalation(
+    handler: BaseHandler,
+    message: Message,
+    pending: PendingEscalation,
+    targets: list[str],
+) -> bool:
     alert = (
-        "🚩 Organizer flag\n"
-        f"Question: {pending.question}\n"
-        f"Group: {pending.group_label}\n"
-        f"Timestamp: {pending.timestamp.isoformat()}"
+        "\U0001f6a9 *Organizer follow-up needed*\n\n"
+        f"*From:* {pending.requester_name} ({_organizer_label(pending.sender_jid)})\n"
+        f"*Group:* {pending.group_label}\n"
+        f"*Received:* {_received_eat(pending.timestamp)}\n\n"
+        "*Question:*\n"
+        f"{pending.question}\n\n"
+        "Please reply to the requester directly."
     )
     delivered = 0
     for target in targets:
         try:
-            await handler.send_message(target, alert, sanitize=False)
+            await handler.send_message(
+                normalize_jid(target),
+                alert,
+                sanitize=False,
+            )
             delivered += 1
-        except Exception:
-            logger.exception("Escalation delivery failed for configured target")
+        except Exception as error:
+            logger.warning(
+                "Escalation delivery failed target=%s error=%s",
+                _organizer_label(target),
+                type(error).__name__,
+            )
 
-    if delivered:
-        await handler.send_message(
-            message.chat_jid, "It has been flagged to an organizer."
-        )
-    else:
-        logger.warning(
-            "Escalation requested but no configured target accepted the flag"
-        )
+    if not delivered:
+        logger.warning("Escalation requested but no organizer accepted the flag")
         await handler.send_message(
             message.chat_jid,
             "I couldn't flag it because the organizer contacts did not accept the message.",
         )
+        return True
+
+    labels = [_organizer_label(target) for target in targets]
+    mentions = [normalize_jid(target) for target in targets]
+    organizer_text = " and ".join(f"@{label}" for label in labels)
+    await handler.send_message(
+        message.chat_jid,
+        f"Thank you, {pending.requester_name}. I've passed your question to "
+        f"{organizer_text}, who will contact you shortly.",
+        in_reply_to=pending.message_id,
+        mentions=mentions,
+    )
     return True
