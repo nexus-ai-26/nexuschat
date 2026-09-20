@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     provider_rate_limit_cooldown_seconds: float = 60.0
     send_retry_attempts: int = 3
     send_retry_base_seconds: float = 0.5
+    catchup_window_hours: float = 6.0
+    catchup_max_replies: int = 20
+    catchup_delay_seconds: float = 2.5
+    catchup_start_delay_seconds: float = 30.0
+    catchup_admin_secret: str | None = None
+    other_bot_jids: Annotated[list[str], NoDecode] = []
 
     @field_validator("qa_testers")
     @classmethod
@@ -162,6 +168,7 @@ class Settings(BaseSettings):
         "kb_exclude_subject_prefixes",
         "escalation_primary_jids",
         "escalation_secondary_jids",
+        "other_bot_jids",
         mode="before",
     )
     @classmethod

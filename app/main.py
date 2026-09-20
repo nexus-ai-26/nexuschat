@@ -10,7 +10,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 import logfire
 
-from api import load_new_kbtopics_api, status, summarize_and_send_to_group_api, webhook
+from api import (
+    catchup,
+    load_new_kbtopics_api,
+    status,
+    summarize_and_send_to_group_api,
+    webhook,
+)
 import models  # noqa
 from config import get_settings
 from whatsapp import WhatsAppClient
@@ -19,6 +25,7 @@ from voyageai.client_async import AsyncClient
 from load_new_kbtopics import topicsLoader
 from services.webhook_processing import process_webhook_message
 from services.webhook_queue import PerChatQueue
+from services.catchup import run_startup_catchup
 
 
 logger = logging.getLogger(__name__)
@@ -95,6 +102,7 @@ async def lifespan(app: FastAPI):
     app.state.background_semaphore = asyncio.Semaphore(
         settings.background_concurrency_limit
     )
+    app.state.catchup_lock = asyncio.Lock()
     webhook_queue: PerChatQueue[WebhookEnvelope] = PerChatQueue(
         lambda payload: process_webhook_message(app, payload),
         maxsize=settings.webhook_queue_maxsize,
@@ -111,6 +119,7 @@ async def lifespan(app: FastAPI):
             app.state.background_semaphore,
         )
     )
+    startup_catchup_task = asyncio.create_task(run_startup_catchup(app))
     logger.info(
         "Periodic KB topic sync started interval_seconds=%s",
         KB_TOPIC_SYNC_INTERVAL_SECONDS,
@@ -123,6 +132,8 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(startup_groups_task, return_exceptions=True)
         kb_topic_sync_task.cancel()
         await asyncio.gather(kb_topic_sync_task, return_exceptions=True)
+        startup_catchup_task.cancel()
+        await asyncio.gather(startup_catchup_task, return_exceptions=True)
         await app.state.whatsapp.close()
         await engine.dispose()
 
@@ -148,6 +159,7 @@ app.include_router(webhook.router)
 app.include_router(status.router)
 app.include_router(summarize_and_send_to_group_api.router)
 app.include_router(load_new_kbtopics_api.router)
+app.include_router(catchup.router)
 
 if __name__ == "__main__":
     import uvicorn
