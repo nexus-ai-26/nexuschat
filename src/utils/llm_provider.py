@@ -91,7 +91,10 @@ def _provider_is_circuit_open(provider: str) -> bool:
 def provider_rate_limit_recently(window_seconds: float = 300.0) -> bool:
     """Return whether any provider was rate limited during the recent window."""
     now = time.monotonic()
-    return any(now - timestamp <= window_seconds for timestamp in _provider_rate_limited_at.values())
+    return any(
+        now - timestamp <= window_seconds
+        for timestamp in _provider_rate_limited_at.values()
+    )
 
 
 def _retry_after_seconds(error: Exception) -> float | None:
@@ -109,7 +112,9 @@ def _retry_after_seconds(error: Exception) -> float | None:
             return None
         return max(
             0.0,
-            (retry_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+            (
+                retry_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)
+            ).total_seconds(),
         )
 
 
@@ -122,7 +127,9 @@ def _open_provider_circuit(
     now = time.monotonic()
     if status_code in {401, 403, 404, 410}:
         cooldown = float(
-            getattr(settings, "provider_permanent_cooldown_seconds", CIRCUIT_BREAKER_SECONDS)
+            getattr(
+                settings, "provider_permanent_cooldown_seconds", CIRCUIT_BREAKER_SECONDS
+            )
         )
         already_open = _provider_circuit_open_until.get(provider, 0.0) > now
         _provider_circuit_open_until[provider] = now + cooldown
@@ -345,7 +352,9 @@ async def run_with_provider_fallback(
             result = await asyncio.wait_for(
                 Agent(**agent_kwargs).run(prompt),
                 timeout=float(
-                    getattr(settings, "provider_timeout_seconds", PROVIDER_TIMEOUT_SECONDS)
+                    getattr(
+                        settings, "provider_timeout_seconds", PROVIDER_TIMEOUT_SECONDS
+                    )
                 ),
             )
         except Exception as error:
@@ -356,14 +365,15 @@ async def run_with_provider_fallback(
             status_code = _status_code(error)
             _open_provider_circuit(candidate.provider, status_code, error, settings)
             logger.warning(
-                "provider=%s failed status=%s, falling back",
+                "LLM provider failed provider=%s status=%s error=%s, falling back",
                 candidate.provider,
                 status_code if status_code is not None else "unknown",
+                type(error).__name__,
             )
             continue
 
         logger.info(
-            "LLM provider served request: provider=%s model=%s",
+            "LLM provider served provider=%s model=%s",
             candidate.provider,
             candidate.name,
         )

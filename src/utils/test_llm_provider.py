@@ -91,6 +91,26 @@ async def test_openai_provider_is_selected_and_uses_direct_model():
 
 
 @pytest.mark.asyncio
+async def test_openai_provider_served_log_is_emitted(caplog):
+    run = AsyncMock(return_value=AgentRunResult(output="openai response"))
+
+    with (
+        patch("utils.llm_provider.Agent", return_value=_Agent(run)),
+        caplog.at_level("INFO", logger="utils.llm_provider"),
+    ):
+        await run_with_provider_fallback(
+            settings(
+                llm_provider_order="openai",
+                openai_api_key="openai-test-key",
+            ),
+            system_prompt="system",
+            prompt="question",
+        )
+
+    assert "LLM provider served provider=openai" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_primary_429_falls_back_to_second():
     first = AsyncMock(side_effect=ModelHTTPError(429, "deepseek-chat"))
     second = AsyncMock(return_value=AgentRunResult(output="gemini response"))
