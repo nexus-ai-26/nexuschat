@@ -44,8 +44,11 @@ async def sync_kb_topics_periodically(
                     )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("Periodic KB topic sync failed")
+        except Exception as error:
+            logger.error(
+                "Periodic KB topic sync failed error=%s",
+                type(error).__name__,
+            )
         await asyncio.sleep(KB_TOPIC_SYNC_INTERVAL_SECONDS)
 
 
@@ -89,9 +92,14 @@ async def lifespan(app: FastAPI):
                 try:
                     await gather_groups(session, app.state.whatsapp)
                     await session.commit()
-                except Exception:
-                    await session.rollback()
+                except asyncio.CancelledError:
                     raise
+                except Exception as error:
+                    await session.rollback()
+                    logger.error(
+                        "Initial group synchronization failed error=%s",
+                        type(error).__name__,
+                    )
 
     startup_groups_task = asyncio.create_task(sync_groups_on_startup())
     app.state.startup_groups_task = startup_groups_task
