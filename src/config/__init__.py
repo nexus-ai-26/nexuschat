@@ -17,6 +17,9 @@ from whatsapp.jid import (
 # Provider prefixes this app manages credentials for.
 # prefix -> (Settings attribute, environment variable pydantic-ai reads)
 _MANAGED_PROVIDERS: Final[dict[str, tuple[str, str]]] = {
+    "openai": ("openai_api_key", "OPENAI_API_KEY"),
+    "openai-chat": ("openai_api_key", "OPENAI_API_KEY"),
+    "openai-responses": ("openai_api_key", "OPENAI_API_KEY"),
     "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
     "openrouter": ("openrouter_api_key", "OPENROUTER_API_KEY"),
     "deepseek": ("deepseek_api_key", "DEEPSEEK_API_KEY"),
@@ -49,6 +52,7 @@ class Settings(BaseSettings):
 
     # LLM provider credentials. Which one is required depends on the provider
     # `model_name` resolves to — see `validate_model_credentials`.
+    openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
     deepseek_api_key: str | None = None
@@ -68,8 +72,8 @@ class Settings(BaseSettings):
     voyage_max_retries: int = 5
 
     # Model settings
-    model_name: str = "google-gla:gemini-2.5-flash"
-    llm_provider_order: str = "deepseek,gemini,kimi,openrouter,nvidia,groq"
+    model_name: str = "openai-responses:gpt-5.4-mini"
+    llm_provider_order: str = "openai"
     ai_enabled: bool = True
 
     # Direct Message settings
@@ -216,6 +220,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def apply_env(self) -> Self:
+        if self.openai_api_key:
+            environ["OPENAI_API_KEY"] = self.openai_api_key
+
         if self.anthropic_api_key:
             environ["ANTHROPIC_API_KEY"] = self.anthropic_api_key
 

@@ -1,18 +1,21 @@
 # This handler is used to handle whatsapp group link spam
 
 import logging
-from .base_handler import BaseHandler
-from pydantic_ai import Agent
+
 from pydantic import BaseModel
-from sqlmodel import Field, select, desc
+from pydantic_ai import Agent
+from sqlmodel import Field, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
 
 from config import Settings
 from models import Message
+from services.prompt_manager import prompt_manager
+from utils.llm_provider import configured_model
 from whatsapp import WhatsAppClient
 from whatsapp.jid import parse_jid
-from services.prompt_manager import prompt_manager
+
+from .base_handler import BaseHandler
 
 # Creating an object
 logger = logging.getLogger(__name__)
@@ -37,7 +40,7 @@ class WhatsappGroupLinkSpamHandler(BaseHandler):
 
     async def __call__(self, message: Message):
         agent = Agent(
-            model=self.settings.model_name,
+            model=configured_model(self.settings),
             system_prompt=prompt_manager.render("link_spam_detector.j2"),
             output_type=self.SpamCheckResult,
             output_retries=3,
@@ -65,12 +68,10 @@ class WhatsappGroupLinkSpamHandler(BaseHandler):
             )
 
         result = await agent.run(
-            (
-                f"@{parse_jid(message.sender_jid).user}:"
-                f"{message.text}"
-                f"The message is from a group chat. The group name is {message.group.group_name if message.group else 'Unknown'} and the group description is {message.group.group_topic if message.group else 'Unknown'}"
-                f"These are the last 10 messages in the group for context:\n{last_messages_text}"
-            )
+            f"@{parse_jid(message.sender_jid).user}:"
+            f"{message.text}"
+            f"The message is from a group chat. The group name is {message.group.group_name if message.group else 'Unknown'} and the group description is {message.group.group_topic if message.group else 'Unknown'}"
+            f"These are the last 10 messages in the group for context:\n{last_messages_text}"
         )
         spam_result = result.output
 

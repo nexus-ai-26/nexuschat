@@ -19,6 +19,8 @@ _ENV_VARS = (
     "ANTHROPIC_API_KEY",
     "OPENROUTER_API_KEY",
     "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_PROVIDER_ORDER",
     "LOGFIRE_TOKEN",
     "MODEL_NAME",
     "AI_ENABLED",
@@ -74,9 +76,9 @@ def test_anthropic_model_without_key_is_rejected():
 
 def test_unmanaged_provider_passes_through_without_a_key():
     # pydantic-ai owns credential resolution for providers we don't manage.
-    settings = build(model_name="openai:gpt-5")
+    settings = build(model_name="cohere:test")
 
-    assert settings.model_name == "openai:gpt-5"
+    assert settings.model_name == "cohere:test"
 
 
 def test_legacy_unprefixed_claude_name_still_requires_anthropic_key():
@@ -101,18 +103,27 @@ def test_both_keys_are_exported_when_both_are_set():
     assert environ["OPENROUTER_API_KEY"] == "sk-or-v1-test"
 
 
-def test_default_model_is_gemini():
-    settings = build(google_api_key="google-test")
-    assert settings.model_name == "google-gla:gemini-2.5-flash"
-    assert environ["GOOGLE_API_KEY"] == "google-test"
+def test_default_model_is_openai():
+    settings = build(openai_api_key="openai-test")
+    assert settings.model_name == "openai-responses:gpt-5.4-mini"
+    assert settings.llm_provider_order == "openai"
+    assert environ["OPENAI_API_KEY"] == "openai-test"
 
 
 def test_gemini_requires_key_when_ai_enabled():
     with pytest.raises(ValidationError, match="GOOGLE_API_KEY"):
-        build()
+        build(model_name="google-gla:gemini-2.5-flash")
 
 
 def test_ai_disabled_allows_startup_without_provider_key():
     settings = build(ai_enabled=False)
     assert settings.google_api_key is None
     assert settings.ai_enabled is False
+
+
+@pytest.mark.parametrize("prefix", ["openai", "openai-chat", "openai-responses"])
+def test_openai_requires_and_exports_key(prefix):
+    with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
+        build(model_name=f"{prefix}:gpt-5.4-mini")
+    build(model_name=f"{prefix}:gpt-5.4-mini", openai_api_key="fake-key")
+    assert environ["OPENAI_API_KEY"] == "fake-key"

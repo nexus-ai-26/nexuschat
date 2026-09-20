@@ -1,15 +1,16 @@
-from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic_ai.agent import AgentRunResult
 from pydantic_ai.exceptions import ModelHTTPError
 
+from config import Settings
 from utils.llm_provider import (
     ProviderConfigurationError,
     ProviderFallbackError,
-    _provider_circuit_open_until,
     _model_chain,
+    _provider_circuit_open_until,
     run_with_provider_fallback,
 )
 
@@ -21,8 +22,8 @@ def reset_provider_circuits():
     _provider_circuit_open_until.clear()
 
 
-def settings(**overrides: object) -> SimpleNamespace:
-    values: dict[str, object] = {
+def settings(**overrides: object) -> Settings:
+    values: dict[str, Any] = {
         "model_name": "openrouter:configured-model",
         "llm_provider_order": "deepseek,gemini,kimi,openrouter,nvidia,groq",
         "deepseek_api_key": "deepseek-test-key",
@@ -39,7 +40,7 @@ def settings(**overrides: object) -> SimpleNamespace:
         "anthropic_api_key": "anthropic-test-key",
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return Settings.model_construct(**values)
 
 
 class _Agent:
@@ -165,20 +166,20 @@ async def test_all_providers_fail_with_graceful_error():
     second = AsyncMock(side_effect=ModelHTTPError(500, "gemini-2.0-flash"))
     third = AsyncMock(side_effect=ConnectionError("connection refused"))
 
-    with patch(
-        "utils.llm_provider.Agent",
-        side_effect=[_Agent(first), _Agent(second), _Agent(third)],
+    with (
+        patch(
+            "utils.llm_provider.Agent",
+            side_effect=[_Agent(first), _Agent(second), _Agent(third)],
+        ),
+        pytest.raises(ProviderFallbackError, match="All active LLM providers failed"),
     ):
-        with pytest.raises(
-            ProviderFallbackError, match="All active LLM providers failed"
-        ):
-            await run_with_provider_fallback(
-                settings(
-                    llm_provider_order="deepseek,gemini,kimi",
-                ),
-                system_prompt="system",
-                prompt="question",
-            )
+        await run_with_provider_fallback(
+            settings(
+                llm_provider_order="deepseek,gemini,kimi",
+            ),
+            system_prompt="system",
+            prompt="question",
+        )
 
 
 @pytest.mark.asyncio
@@ -226,8 +227,97 @@ async def test_non_provider_error_does_not_fall_through():
     error = ValueError("invalid request")
     run = AsyncMock(side_effect=error)
 
-    with patch("utils.llm_provider.Agent", return_value=_Agent(run)):
-        with pytest.raises(ValueError, match="invalid request"):
-            await run_with_provider_fallback(
-                settings(), system_prompt="system", prompt="question"
-            )
+    with (
+        patch("utils.llm_provider.Agent", return_value=_Agent(run)),
+        pytest.raises(ValueError, match="invalid request"),
+    ):
+        await run_with_provider_fallback(
+            settings(), system_prompt="system", prompt="question"
+        )
+
+
+def test_openai_only_chain_does_not_use_other_configured_keys():
+    chain = _model_chain(
+        settings(
+            model_name="openai-responses:gpt-5.4-mini",
+            llm_provider_order="openai",
+            openai_api_key="test-key",
+        )
+    )
+    assert [item.provider for item in chain] == ["openai"]
+    assert chain[0].model.model_name == "gpt-5.4-mini"
+
+
+@pytest.mark.asyncio
+async def test_openai_request_uses_responses_without_remote_conversation_state(
+    httpx_mock,
+):
+    import json
+
+    httpx_mock.add_response(
+        json={
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-5.4-mini",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_test",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Saturday confirmed",
+                            "annotations": [],
+                        }
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 3, "total_tokens": 13},
+        }
+    )
+    result = await run_with_provider_fallback(
+        settings(
+            model_name="openai-responses:gpt-5.4-mini",
+            llm_provider_order="openai",
+            openai_api_key="fake-key",
+        ),
+        system_prompt="Use supplied context",
+        prompt="Saturday confirmed",
+    )
+    assert result.output == "Saturday confirmed"
+    request = httpx_mock.get_request()
+    assert str(request.url) == "https://api.openai.com/v1/responses"
+    body = json.loads(request.content)
+    assert body["store"] is False
+    assert body["reasoning"]["effort"] == "none"
+    assert "previous_response_id" not in body
+
+
+@pytest.mark.asyncio
+async def test_openai_quota_error_keeps_status_and_is_not_retried(httpx_mock):
+    httpx_mock.add_response(
+        status_code=429,
+        json={
+            "error": {
+                "message": "quota",
+                "type": "insufficient_quota",
+                "code": "insufficient_quota",
+            }
+        },
+    )
+    with pytest.raises(ModelHTTPError) as exc:
+        await run_with_provider_fallback(
+            settings(
+                model_name="openai-responses:gpt-5.4-mini",
+                llm_provider_order="openai",
+                openai_api_key="fake-key",
+            ),
+            system_prompt="system",
+            prompt="test",
+        )
+    assert exc.value.status_code == 429
+    assert len(httpx_mock.get_requests()) == 1

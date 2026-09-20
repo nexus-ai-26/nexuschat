@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Sequence
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from enum import Enum
 
@@ -10,18 +10,18 @@ from sqlmodel import desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
 
+from config import Settings
 from handler.knowledge_base_answers import KnowledgeBaseAnswers
 from models import Message
-from whatsapp.jid import parse_jid
+from services.prompt_manager import prompt_manager
 from utils.chat_text import chat2text
+from utils.llm_provider import configured_model, run_with_provider_fallback
 from utils.opt_out import get_opt_out_map
 from whatsapp import WhatsAppClient
-from config import Settings
-from .base_handler import BaseHandler
-from services.prompt_manager import prompt_manager
-from utils.llm_provider import run_with_provider_fallback
-from .auto_reply import is_clear_banter
+from whatsapp.jid import parse_jid
 
+from .auto_reply import is_clear_banter
+from .base_handler import BaseHandler
 
 # Creating an object
 logger = logging.getLogger(__name__)
@@ -132,7 +132,7 @@ class Router(BaseHandler):
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
 
         agent = Agent(
-            model=self.settings.model_name,
+            model=configured_model(self.settings),
             system_prompt=prompt_manager.render("summarize.j2"),
             output_type=str,
         )

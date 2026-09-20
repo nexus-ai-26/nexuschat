@@ -9,7 +9,11 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import (
+    OpenAIChatModel,
+    OpenAIResponsesModel,
+    OpenAIResponsesModelSettings,
+)
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from config import Settings
@@ -27,7 +31,7 @@ NVIDIA_MODEL = "openai/gpt-oss-20b"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 PROVIDER_TIMEOUT_SECONDS = 30.0
 CIRCUIT_BREAKER_SECONDS = 10 * 60
-DEFAULT_PROVIDER_ORDER = "deepseek,gemini,kimi,openrouter,nvidia,groq"
+DEFAULT_PROVIDER_ORDER = "openai"
 _provider_circuit_open_until: dict[str, float] = {}
 
 
@@ -85,7 +89,9 @@ def _provider_is_circuit_open(provider: str) -> bool:
 
 
 def _open_provider_circuit(provider: str, status_code: int | None) -> None:
-    if status_code in {401, 402, 404}:
+    if status_code == 429:
+        _provider_circuit_open_until[provider] = time.monotonic() + 60
+    elif status_code in {401, 402, 404}:
         _provider_circuit_open_until[provider] = (
             time.monotonic() + CIRCUIT_BREAKER_SECONDS
         )
@@ -105,6 +111,32 @@ def _openai_model(
     return OpenAIChatModel(
         model_name,
         provider=OpenAIProvider(openai_client=client),
+    )
+
+
+def configured_model(
+    settings: Settings,
+) -> OpenAIResponsesModel | OpenAIChatModel | str:
+    """Resolve direct agent calls with the same OpenAI policy as the provider chain."""
+    prefix, _, name = settings.model_name.partition(":")
+    if prefix not in {"openai", "openai-chat", "openai-responses"}:
+        return settings.model_name
+    client = AsyncOpenAI(
+        api_key=settings.openai_api_key,
+        base_url="https://api.openai.com/v1",
+        timeout=PROVIDER_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    options = OpenAIResponsesModelSettings(
+        openai_store=False, timeout=PROVIDER_TIMEOUT_SECONDS
+    )
+    if name.startswith("gpt-5.4"):
+        options["openai_reasoning_effort"] = "none"
+    model_class = (
+        OpenAIResponsesModel if prefix == "openai-responses" else OpenAIChatModel
+    )
+    return model_class(
+        name, provider=OpenAIProvider(openai_client=client), settings=options
     )
 
 
@@ -160,6 +192,11 @@ def _model_chain(settings: Settings) -> list[_ModelCandidate]:
     model_name = getattr(settings, "model_name", "")
     model_provider = model_name.partition(":")[0].lower()
     builders = {
+        "openai": (
+            "openai_api_key",
+            lambda: configured_model(settings),
+            lambda: model_name,
+        ),
         "deepseek": (
             "deepseek_api_key",
             lambda: _deepseek_model(settings),
@@ -215,6 +252,15 @@ def _model_chain(settings: Settings) -> list[_ModelCandidate]:
         if not getattr(settings, key_attribute, None):
             logger.debug("Skipping LLM provider with no API key: %s", provider)
             continue
+
+        if provider == "openai" and model_provider not in {
+            "openai",
+            "openai-chat",
+            "openai-responses",
+        }:
+            raise ProviderConfigurationError(
+                "OpenAI requires an openai-prefixed MODEL_NAME."
+            )
 
         if provider == "anthropic" and model_provider != "anthropic":
             logger.warning(
@@ -298,6 +344,8 @@ async def run_with_provider_fallback(
     logger.error("All active LLM providers failed: %s", details)
     if failures:
         last_error = failures[-1][1]
+        if len(models) == 1 and is_rate_limit_error(last_error):
+            raise last_error
         raise ProviderFallbackError(
             f"All active LLM providers failed ({details})."
         ) from last_error

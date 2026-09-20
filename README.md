@@ -241,3 +241,29 @@ The project consists of several key components:
 ## License
 
 [LICENCE](CODE_OF_CONDUCT.md)
+
+
+### OpenAI configuration
+
+Set `OPENAI_API_KEY`, `MODEL_NAME=openai-responses:gpt-5.4-mini`,
+`LLM_PROVIDER_ORDER=openai`, and `AI_ENABLED=true` in `.env`. Recreate the
+backend with `docker-compose up -d --no-deps --force-recreate web-server`.
+The provider chain and direct agents (summaries and moderation) use OpenAI.
+Other configured keys are unused when the provider order is only `openai`.
+`PARTICIPATION_MODEL_NAME` belongs to the older branch; main uses the provider
+chain plus `AUTO_REPLY_GROUPS` for automatic replies.
+
+Memory remains in PostgreSQL/pgvector with the existing Voyage embeddings.
+No reindex or database migration is needed. OpenAI requests use `store=false`;
+conversation context is supplied from local retrieval. Automatic SDK retries
+are disabled for OpenAI. A quota response is preserved as HTTP 429 and opens
+a short provider cooldown.
+
+Live test (uses synthetic records, real providers, rolls back, never sends WhatsApp):
+
+```bash
+docker cp scripts/test_openai_memory.py nexuschat-web-server-1:/tmp/test_openai_memory.py
+docker exec -e PYTHONPATH=/app/src nexuschat-web-server-1 python /tmp/test_openai_memory.py
+```
+
+Model: [OpenAI GPT-5.4 mini](https://developers.openai.com/api/docs/models/gpt-5.4-mini).
