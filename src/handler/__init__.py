@@ -182,6 +182,8 @@ class MessageHandler(BaseHandler):
 
         # Only configured groups get the unmentioned automatic-reply path.
         if auto_reply_group:
+            # ``auto_reply_group`` can only be true when ``group_jid`` is set.
+            assert group_jid is not None
             rule = auto_reply_question_rule(message.text)
             if rule is None:
                 self._log_auto_reply_skip(
