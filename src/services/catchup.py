@@ -213,6 +213,7 @@ def _message_envelope(message: Message) -> WebhookEnvelope:
 class CatchupService:
     def __init__(self, app: Any):
         self.app = app
+        self._device_id: str | None = None
 
     @property
     def settings(self) -> Settings:
@@ -239,7 +240,10 @@ class CatchupService:
             is_from_me=False,
         )
         response = await asyncio.wait_for(
-            whatsapp.get_chat_messages(group_jid, params=params), timeout=30
+            whatsapp.get_chat_messages(
+                group_jid, params=params, device_id=self._device_id
+            ),
+            timeout=30,
         )
         return [
             parsed
@@ -307,6 +311,16 @@ class CatchupService:
                 type(error).__name__,
             )
             return stats
+
+        try:
+            devices = await whatsapp.list_devices()
+            if devices.results:
+                self._device_id = getattr(devices.results[0], "device_id", None)
+        except Exception as error:
+            logger.warning(
+                "Catch-up device scope unavailable error=%s",
+                type(error).__name__,
+            )
 
         async with self.app.state.async_session() as session:
             groups = await self._served_groups(session)
