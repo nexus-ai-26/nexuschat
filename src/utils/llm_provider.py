@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -187,8 +188,11 @@ def _openrouter_model(settings: Settings) -> OpenAIChatModel:
 
 
 def _openai_direct_model(settings: Settings) -> OpenAIChatModel:
+    model_name = getattr(settings, "openai_model", None) or os.getenv(
+        "OPENAI_MODEL", OPENAI_MODEL
+    )
     return _openai_model(
-        OPENAI_MODEL,
+        model_name,
         base_url="https://api.openai.com/v1",
         api_key=settings.openai_api_key or "",
     )
@@ -240,7 +244,7 @@ def _model_chain(settings: Settings) -> list[_ModelCandidate]:
         "openai": (
             "openai_api_key",
             lambda: _openai_direct_model(settings),
-            lambda: f"openai:{OPENAI_MODEL}",
+            lambda: f"openai:{getattr(settings, 'openai_model', None) or os.getenv('OPENAI_MODEL', OPENAI_MODEL)}",
         ),
         "deepseek": (
             "deepseek_api_key",

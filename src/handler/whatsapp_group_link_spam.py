@@ -74,16 +74,9 @@ class WhatsappGroupLinkSpamHandler(BaseHandler):
         assert message.group is not None, "Group is required"
         assert message.group.owner_jid is not None, "Group owner JID is required"
 
-        # Construct message with validated data
-        message_to_send = (
-            f"@{message.group.owner_jid.split('@')[0]} - A Whatsapp group link was shared in the group."
-            f"This might be a spam. Please check and remove if it is spam.\n\n"
-            f"Spam Confidence Level: *{spam_result.score}*  (1 not spam - 5 spam) \n"
-            f"Explanation: {spam_result.explanation}"
-        )
-
-        await self.send_message(
+        logger.info(
+            "reply skipped chat=%s message=%s reason=group link moderation is not a programme question score=%s",
             message.chat_jid,
-            message_to_send,
-            in_reply_to=message.message_id,
+            message.message_id,
+            spam_result.score,
         )

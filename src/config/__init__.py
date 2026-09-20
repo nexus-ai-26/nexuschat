@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     # `model_name` resolves to — see `validate_model_credentials`.
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
     openrouter_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"

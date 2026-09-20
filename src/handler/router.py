@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import Sequence
@@ -18,8 +19,8 @@ from whatsapp import WhatsAppClient
 from config import Settings
 from .base_handler import BaseHandler
 from services.prompt_manager import prompt_manager
-from utils.llm_provider import run_with_provider_fallback
-from .auto_reply import is_clear_banter
+from utils.llm_provider import ProviderFallbackError, run_with_provider_fallback
+from .auto_reply import is_programme_request, silent_message_reason
 
 
 # Creating an object
@@ -34,27 +35,31 @@ NEXUS_INTRO = (
     "a message was AI-generated just by reading it, and I won't pretend otherwise."
 )
 BOT_FIXED_REPLY = (
-    "I'm Nexus, the programme-materials assistant. "
-    "I answer questions only from the programme materials."
+    "I'm Nexus, the UniPods METI AI programme assistant. Ask me about sessions, deadlines, MIT, Wadhwani or links."
 )
 _BOT_QUESTION_RE = re.compile(
     r"^\s*(?:@\S+\s+)*(?:who\s+are\s+you|are\s+you\s+(?:a\s+)?bot|"
-    r"what\s+can\s+you\s+do|which\s+bots?\s+are\s+running|"
-    r"what(?:'s|\s+is)\s+about\s+nexus)\s*[?!.,]*\s*$",
+    r"what\s+can\s+you\s+do)\s*[?!.,]*\s*$",
     re.IGNORECASE,
 )
 
 
 _CONTENT_QUESTION_RE = re.compile(
-    r"\b(?:quel|quelle|quels|quelles|quand|comment|pourquoi|qui|quoi|"
-    r"pouvez|peut|aidez|svp|inscription)\b",
+    r"\b(?:what|when|where|how|why|who|can|does|is|help|please|give|send|"
+    r"share|forward|need|recap|summary|summarize|happened|quel|quelle|"
+    r"quels|quelles|quand|comment|pourquoi|qui|quoi|pouvez|peut|aidez|"
+    r"svp|inscription)\b",
     re.IGNORECASE,
 )
 
 
 def _looks_like_content_question(text: str) -> bool:
     """Keep multilingual content questions out of the generic intent fallback."""
-    return "?" in text or bool(_CONTENT_QUESTION_RE.search(text))
+    return (
+        "?" in text
+        or bool(_CONTENT_QUESTION_RE.search(text))
+        or is_programme_request(text)
+    )
 
 
 class IntentEnum(str, Enum):
@@ -90,6 +95,7 @@ class Router(BaseHandler):
 
     async def __call__(self, message: Message):
         if not message.text:
+            logger.info("reply skipped chat=%s reason=no text", message.chat_jid)
             return
 
         if _BOT_QUESTION_RE.fullmatch(message.text):
@@ -100,28 +106,39 @@ class Router(BaseHandler):
             )
             return
 
-        if is_clear_banter(message.text):
-            await self.send_message(
+        reason = silent_message_reason(message.text)
+        if reason:
+            logger.info(
+                "reply skipped chat=%s message=%s reason=%s",
                 message.chat_jid,
-                "Please ask a question about the programme materials.",
-                in_reply_to=message.message_id,
+                message.message_id,
+                reason,
             )
             return
 
-        if _looks_like_content_question(message.text):
-            await self.ask_knowledge_base(message)
-            return
-
-        route = await self._route(message.text)
-        match route:
-            case IntentEnum.summarize:
-                await self.summarize(message)
-            case IntentEnum.ask_question:
+        try:
+            if _looks_like_content_question(message.text):
                 await self.ask_knowledge_base(message)
-            case IntentEnum.about:
-                await self.about(message)
-            case IntentEnum.other:
-                await self.default_response(message)
+                return
+
+            route = await self._route(message.text)
+            match route:
+                case IntentEnum.ask_question:
+                    await self.ask_knowledge_base(message)
+                case IntentEnum.summarize | IntentEnum.about | IntentEnum.other:
+                    logger.info(
+                        "reply skipped chat=%s message=%s reason=not grounded programme answer intent=%s",
+                        message.chat_jid,
+                        message.message_id,
+                        route.value,
+                    )
+        except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+            logger.warning(
+                "reply skipped chat=%s message=%s reason=provider failure error=%s",
+                message.chat_jid,
+                message.message_id,
+                type(error).__name__,
+            )
 
     async def _route(self, message: str) -> IntentEnum:
         result = await run_with_provider_fallback(
@@ -133,6 +150,12 @@ class Router(BaseHandler):
         return result.output.intent
 
     async def summarize(self, message: Message):
+        logger.info(
+            "reply skipped chat=%s message=%s reason=summarization is not a programme question",
+            message.chat_jid,
+            message.message_id,
+        )
+        return
         time_24_hours_ago = datetime.now() - timedelta(hours=24)
         stmt = (
             select(Message)
@@ -170,15 +193,15 @@ class Router(BaseHandler):
         )
 
     async def about(self, message):
-        await self.send_message(
+        logger.info(
+            "reply skipped chat=%s message=%s reason=about request is not fixed identity question",
             message.chat_jid,
-            NEXUS_INTRO,
-            in_reply_to=message.message_id,
+            message.message_id,
         )
 
     async def default_response(self, message):
-        await self.send_message(
+        logger.info(
+            "reply skipped chat=%s message=%s reason=not a programme question",
             message.chat_jid,
-            "Please ask a specific question about the programme materials.",
-            in_reply_to=message.message_id,
+            message.message_id,
         )

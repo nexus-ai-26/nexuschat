@@ -15,13 +15,7 @@ from handler.auto_reply import (
     auto_reply_question_rule,
     auto_reply_text_skip_reason,
 )
-from handler.escalation import (
-    handle_pending_confirmation,
-    is_escalation_status_question,
-    is_human_request,
-    offer_escalation,
-    pending_status_message,
-)
+from handler.auto_reply import silent_message_reason
 from handler.kb_qa import KBQAHandler
 from handler.router import Router
 from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
@@ -101,19 +95,14 @@ class MessageHandler(BaseHandler):
         if not message.text:
             if auto_reply_group:
                 self._log_auto_reply_skip(group_jid, "no text")
+            else:
+                logger.info("reply skipped chat=%s reason=no text", message.chat_jid)
             return
 
         if message.sender_jid.endswith("@lid"):
             logger.info(
                 f"Received message from {message.sender_jid}: {payload.model_dump_json()}"
             )
-
-        if not message.group and is_escalation_status_question(message.text):
-            await self.send_message(message.chat_jid, pending_status_message(message))
-            return
-
-        if await handle_pending_confirmation(self, message):
-            return
 
         # direct message
         if message and not message.group:
@@ -127,9 +116,6 @@ class MessageHandler(BaseHandler):
                 return
             elif command == "status":
                 await self.handle_opt_status(message)
-                return
-            if is_human_request(message.text):
-                await offer_escalation(self, message)
                 return
             await self.router(message)
             return
@@ -147,20 +133,13 @@ class MessageHandler(BaseHandler):
                     return
                 _processing_cache[message.message_id] = True
 
-        # Check for /kb_qa command (super admin only)
-        # This does not have to be a managed group
+        # Testing commands are intentionally silent in the public chat.
         if message.group and message.text.startswith("/kb_qa "):
-            if message.chat_jid not in self.settings.qa_test_groups:
-                logger.warning(
-                    f"QA command attempted from non-whitelisted group: {message.chat_jid}"
-                )
-                return  # Silent failure
-            # Check if sender is a QA tester
-            if message.sender_jid not in self.settings.qa_testers:
-                logger.warning(f"Unauthorized /kb_qa attempt from {message.sender_jid}")
-                return  # Silent failure
-
-            await self.kb_qa_handler(message)
+            logger.info(
+                "reply skipped chat=%s message=%s reason=testing",
+                message.chat_jid,
+                message.message_id,
+            )
             return
 
         active_group = bool(group_jid and group_jid in self._configured_active_groups())
@@ -177,26 +156,19 @@ class MessageHandler(BaseHandler):
         ):
             return
 
-        if is_escalation_status_question(message.text):
-            await self.send_message(message.chat_jid, pending_status_message(message))
-            return
-
         mentioned = message.has_mentioned(my_jid)
-        if is_human_request(message.text) and (
-            mentioned or auto_reply_group or active_group
-        ):
-            await offer_escalation(self, message)
+        silent_reason = silent_message_reason(message.text)
+        if silent_reason:
+            self._log_silent(message, silent_reason)
             return
         if mentioned:
             await self.router(message)
             return
 
-        if (
-            message.group
-            and message.group.notify_on_spam
-            and self._contains_whatsapp_group_link(message.text)
+        if message.group and message.group.notify_on_spam and self._contains_whatsapp_group_link(
+            message.text
         ):
-            await self.whatsapp_group_link_spam(message)
+            self._log_silent(message, "group link is not a programme question")
             return
 
         # Only configured groups get the unmentioned automatic-reply path.
@@ -276,6 +248,15 @@ class MessageHandler(BaseHandler):
     def _log_auto_reply_skip(group_jid: str | None, reason: str) -> None:
         logger.info("auto-reply skipped group=%s reason=%s", group_jid, reason)
 
+    @staticmethod
+    def _log_silent(message: Message, reason: str) -> None:
+        logger.info(
+            "reply skipped chat=%s message=%s reason=%s",
+            message.chat_jid,
+            message.message_id,
+            reason,
+        )
+
     def _contains_whatsapp_group_link(self, text: str) -> bool:
         """
         Return True if the given text contains a WhatsApp group invite link
@@ -301,35 +282,24 @@ class MessageHandler(BaseHandler):
         if not opt_out:
             opt_out = OptOut(jid=message.sender_jid)
             await self.upsert(opt_out)
-            await self.send_message(
-                message.chat_jid,
-                "You have been opted out. You will no longer be tagged in summaries and answers.",
-            )
+            logger.info("DM command handled chat=%s command=opt-out", message.chat_jid)
         else:
-            await self.send_message(
-                message.chat_jid,
-                "You are already opted out.",
-            )
+            logger.info("DM command handled chat=%s command=opt-out already_set", message.chat_jid)
 
     async def handle_opt_in(self, message: Message):
         opt_out = await self.session.get(OptOut, message.sender_jid)
         if opt_out:
             await self.session.delete(opt_out)
             await self.session.commit()
-            await self.send_message(
-                message.chat_jid,
-                "You have been opted in. You will now be tagged in summaries and answers.",
-            )
+            logger.info("DM command handled chat=%s command=opt-in", message.chat_jid)
         else:
-            await self.send_message(
-                message.chat_jid,
-                "You are already opted in.",
-            )
+            logger.info("DM command handled chat=%s command=opt-in already_set", message.chat_jid)
 
     async def handle_opt_status(self, message: Message):
         opt_out = await self.session.get(OptOut, message.sender_jid)
         status = "opted out" if opt_out else "opted in"
-        await self.send_message(
+        logger.info(
+            "DM command handled chat=%s command=status status=%s",
             message.chat_jid,
-            f"You are currently {status}.",
+            status,
         )

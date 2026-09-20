@@ -153,6 +153,7 @@ async def test_router_summarize_route(
     mock_settings: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    test_message.text = "What happened this week?"
     # Mock the Agent class for routing
     mock_route_agent = MockAgent(Intent(intent=IntentEnum.summarize))
 
@@ -188,18 +189,13 @@ async def test_router_summarize_route(
 
     # Create router instance
     router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.ask_knowledge_base = AsyncMock()
 
     # Test the route
     await router(test_message)
 
-    # Verify the summary was sent
-    mock_whatsapp.send_message.assert_called_once_with(
-        SendMessageRequest(
-            phone="user@s.whatsapp.net",
-            message="Summary of messages",
-            reply_message_id="test_id",
-        )
-    )
+    router.ask_knowledge_base.assert_awaited_once_with(test_message)
+    mock_whatsapp.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -227,8 +223,7 @@ async def test_router_other_route(
     # Test the route
     await router(test_message)
 
-    # Verify the default response message was sent
-    mock_whatsapp.send_message.assert_called_once()
+    mock_whatsapp.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -348,8 +343,7 @@ async def test_router_answers_clear_banter_without_llm(
 
     await router(message)
 
-    router.send_message.assert_awaited_once()
-    assert "programme materials" in router.send_message.await_args.args[1]
+    router.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -391,6 +385,9 @@ async def test_fixed_bot_reply_only_matches_assistant_questions(
     )
 
     router.send_message.assert_awaited_once()
+    assert router.send_message.await_args.args[1] == (
+        "I'm Nexus, the UniPods METI AI programme assistant. Ask me about sessions, deadlines, MIT, Wadhwani or links."
+    )
     router.ask_knowledge_base.assert_not_awaited()
 
 

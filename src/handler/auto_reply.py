@@ -35,7 +35,36 @@ _QUESTION_WORDS = (
     "does",
     "is",
     "help",
-    "please",
+            "please",
+            "give",
+            "send",
+            "share",
+            "forward",
+            "need",
+            "recap",
+            "summary",
+            "happened",
+    "tell",
+    "explain",
+    "describe",
+    "could",
+    "would",
+    "should",
+    "do",
+    "are",
+    "quel",
+    "quelle",
+    "quels",
+    "quelles",
+    "quand",
+    "comment",
+    "pourquoi",
+    "qui",
+    "quoi",
+    "pouvez",
+    "peut",
+    "aidez",
+    "inscription",
 )
 _AMHARIC_QUESTION_MARKERS = ("ምን", "መቼ", "የት", "እንዴት", "ለምን", "ማን", "እባክ")
 _GREETING_OR_CHITCHAT = (
@@ -47,6 +76,11 @@ _GREETING_OR_CHITCHAT = (
 )
 
 NO_ANSWER_SENTINEL = "NO_ANSWER"
+
+_PROGRAMME_REQUEST_RE = re.compile(
+    r"\b(?:give|send|share|forward|need|recap|summary|summarize|happened)\b",
+    re.IGNORECASE,
+)
 
 
 def has_confident_match(
@@ -106,12 +140,79 @@ def auto_reply_text_skip_reason(text: str | None) -> str:
 
 def is_clear_banter(text: str | None) -> bool:
     """Recognize only obvious banter; ambiguous text remains on the normal path."""
-    if not text or auto_reply_question_rule(text) is not None:
+    if not text:
         return False
     normalized = text.casefold().strip()
-    if any(marker in normalized for marker in ("lol", "lmao", "haha", "knock knock")):
+    if any(
+        marker in normalized
+        for marker in (
+            "lol",
+            "lmao",
+            "haha",
+            "knock knock",
+            "just kidding",
+            "it's a joke",
+            "its a joke",
+            "joke",
+        )
+    ):
         return True
     return any(emoji in text for emoji in ("😂", "🤣", "😅"))
+
+
+_BOT_META_RE = re.compile(
+    r"\b(?:which|what|are there|other|another)\s+(?:\w+\s+)?(?:bots?|agents?|models?|assistants?)\b"
+    r"|\b(?:bots?|agents?|models?)\b.*\b(?:running|used|available|version|power(?:ing|ed))\b",
+    re.IGNORECASE,
+)
+_POLL_OR_VOTE_RE = re.compile(
+    r"\b(?:poll|polls|vote|votes|voting|survey|ballot)\b", re.IGNORECASE
+)
+_TESTING_RE = re.compile(r"\b(?:test|testing|tested|tester|testers)\b", re.IGNORECASE)
+_BOT_TESTING_RE = re.compile(
+    r"\b(?:bot|bots|assistant|chatbot|ai)\b.*\b(?:test|testing|tested|tester|testers)\b"
+    r"|\b(?:test|testing|tested|tester|testers)\b.*\b(?:bot|bots|assistant|chatbot|ai)\b",
+    re.IGNORECASE,
+)
+_OTHER_CLAIM_RE = re.compile(
+    r"\b(?:someone|somebody|they|he|she|my\s+(?:friend|team(?:mate)?))\s+"
+    r"(?:said|says|claim(?:ed|s)?|mentioned|thinks?|told)\b"
+    r"|\baccording\s+to\s+(?:someone|somebody|them|him|her|[a-z][\w-]*)\b",
+    re.IGNORECASE,
+)
+
+
+def silent_message_reason(text: str | None) -> str | None:
+    """Return the policy reason a message must not trigger a public reply."""
+    if not text or not text.strip():
+        return "no text"
+    if is_clear_banter(text):
+        return "banter/insult/joke"
+    normalized = text.casefold().strip()
+    if any(pattern.fullmatch(normalized) for pattern in _GREETING_OR_CHITCHAT):
+        return "banter/insult/joke"
+    if re.search(
+        r"\b(?:idiot|stupid|dumb|fool|moron|clown|useless|sucks?)\b|\bshut\s+up\b",
+        normalized,
+    ):
+        return "banter/insult/joke"
+    if _BOT_META_RE.search(text):
+        return "bot or model meta-question"
+    if _POLL_OR_VOTE_RE.search(text):
+        return "vote/poll"
+    if _TESTING_RE.search(text) and not _PROGRAMME_REQUEST_RE.search(text):
+        if _BOT_TESTING_RE.search(text) or "slot" not in text.casefold():
+            return "testing"
+    if _OTHER_CLAIM_RE.search(text):
+        return "other person's claim"
+    if auto_reply_question_rule(text) is None and not _PROGRAMME_REQUEST_RE.search(text):
+        return "not a question"
+    return None
+
+
+def is_programme_request(text: str | None) -> bool:
+    """Recognize direct requests that should reach the KB even without '?'."""
+    return bool(text and _PROGRAMME_REQUEST_RE.search(text))
 
 
 def is_no_answer(response: str) -> bool:

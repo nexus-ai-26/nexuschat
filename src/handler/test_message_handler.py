@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from config import Settings
 from handler.auto_reply import auto_reply_limiter
-from handler.escalation import offer_escalation, reset_pending_escalations
 from gowa_sdk.webhooks import WebhookEnvelope
 from models import DMGreeting, Group, Message
 from handler import DM_OPENING, MessageHandler
@@ -41,10 +40,8 @@ def mock_settings():
 @pytest.fixture(autouse=True)
 def reset_auto_reply_state():
     auto_reply_limiter.reset()
-    reset_pending_escalations()
     yield
     auto_reply_limiter.reset()
-    reset_pending_escalations()
 
 
 @pytest.mark.asyncio
@@ -565,52 +562,6 @@ async def test_private_chat_sends_durable_opening_once_then_routes_question(
     )
     assert handler.send_message.await_count == 1
     assert handler.router.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_escalation_status_question_never_reaches_router(
-    mock_session: AsyncSessionMock,
-    mock_whatsapp: AsyncMock,
-    mock_embedding_client: AsyncMock,
-    mock_settings: Mock,
-):
-    handler = MessageHandler(
-        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
-    )
-    handler.send_message = AsyncMock()
-    original = Message(
-        message_id="pending-question",
-        chat_jid="user@s.whatsapp.net",
-        sender_jid="user@s.whatsapp.net",
-        text="Who can help?",
-    )
-    await offer_escalation(handler, original)
-
-    handler.router = AsyncMock()
-    status_message = Message(
-        message_id="pending-status",
-        chat_jid="user@s.whatsapp.net",
-        sender_jid="user@s.whatsapp.net",
-        text="Did that get sent?",
-    )
-    handler.store_message = AsyncMock(return_value=status_message)
-    payload = WebhookEnvelope.model_validate(
-        {
-            "event": "message",
-            "payload": {
-                "id": "pending-status",
-                "chat_id": "user@s.whatsapp.net",
-                "from": "user@s.whatsapp.net",
-                "timestamp": datetime.now(UTC),
-                "body": status_message.text,
-            },
-        }
-    )
-
-    await handler(payload)
-
-    handler.router.assert_not_awaited()
-    assert "waiting" in handler.send_message.await_args_list[-1].args[1]
 
 
 @pytest.mark.asyncio

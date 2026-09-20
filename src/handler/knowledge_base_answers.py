@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from .auto_reply import (
     is_no_answer,
     is_too_short_for_auto_reply,
     normalize_question,
+    silent_message_reason,
 )
 from .base_handler import BaseHandler
 from config import Settings
@@ -33,7 +35,7 @@ from services.document_ingestion import (
     index_document,
     is_supported_document,
 )
-from utils.llm_provider import run_with_provider_fallback
+from utils.llm_provider import ProviderFallbackError, run_with_provider_fallback
 from utils.reply_text import clean_visible_reply
 
 
@@ -46,10 +48,14 @@ _FILE_REQUEST_RE = re.compile(
     re.IGNORECASE,
 )
 _MAX_FORWARD_BYTES = 25 * 1024 * 1024
-NO_KB_REPLY = (
-    "I don't have that in the programme materials, so I'd rather not guess. "
-    "Please check with the organizers.\n"
-    "Would you like me to flag this to the organizers?"
+_RECAP_RE = re.compile(
+    r"\b(?:recap|summary|summarize|this\s+week|what\s+happened|updates?)\b",
+    re.IGNORECASE,
+)
+_NON_ANSWER_REPLY_RE = re.compile(
+    r"i\s+don['’]?t\s+have.*programme\s+materials|"
+    r"flag\s+this.*organizer|trouble\s+answering|please\s+ask.*programme\s+materials",
+    re.IGNORECASE | re.DOTALL,
 )
 
 
@@ -70,6 +76,16 @@ class KnowledgeBaseAnswers(BaseHandler):
             logger.warning(f"Received message with no text from {message.sender_jid}")
             if auto_reply:
                 self._log_auto_reply_skip(message, "no text")
+            return False
+
+        silent_reason = silent_message_reason(message.text)
+        if silent_reason:
+            logger.info(
+                "RAG reply skipped chat=%s message=%s reason=%s",
+                message.chat_jid,
+                message.message_id,
+                silent_reason,
+            )
             return False
 
         if auto_reply:
@@ -97,9 +113,10 @@ class KnowledgeBaseAnswers(BaseHandler):
             group_jid=message.group_jid,
             bot_jid=bot_jid,
         )
+        organizer_history = await self._recent_organizer_messages(message)
 
         # Get opt-out map
-        all_jids = {m.sender_jid for m in history}
+        all_jids = {m.sender_jid for m in history + organizer_history}
         all_jids.add(message.sender_jid)
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
         # Release any DB transaction/connection before the first provider call.
@@ -109,12 +126,12 @@ class KnowledgeBaseAnswers(BaseHandler):
 
         document_results, document_error = await self._quoted_document_results(message)
         if document_error:
-            await self.send_message(
+            logger.info(
+                "RAG reply skipped chat=%s message=%s reason=unreadable document",
                 message.chat_jid,
-                "I can't read that file. Please paste the relevant section.",
-                in_reply_to=message.message_id,
+                message.message_id,
             )
-            return True
+            return False
 
         if document_results:
             # A quoted document is the authoritative source for this question.
@@ -122,9 +139,13 @@ class KnowledgeBaseAnswers(BaseHandler):
             search_results = document_results
             weak_match_context = False
         else:
-            rephrased_result = await self.rephrasing_agent(
-                my_jid.user, message, history, opt_out_map
-            )
+            try:
+                rephrased_result = await self.rephrasing_agent(
+                    my_jid.user, message, history, opt_out_map
+                )
+            except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+                self._log_provider_skip(message, error)
+                return False
             embedded_question = (
                 await voyage_embed_text(
                     self.embedding_client, [rephrased_result.output]
@@ -189,15 +210,20 @@ class KnowledgeBaseAnswers(BaseHandler):
         ]
 
         sender_number = parse_jid(message.sender_jid).user
-        generation_result = await self.generation_agent(
-            message.text,
-            formatted_topics,
-            message.sender_jid,
-            history,
-            opt_out_map,
-            auto_reply=auto_reply,
-            weak_match=weak_match_context,
-        )
+        try:
+            generation_result = await self.generation_agent(
+                message.text,
+                formatted_topics,
+                message.sender_jid,
+                history,
+                opt_out_map,
+                auto_reply=auto_reply,
+                weak_match=weak_match_context,
+                organizer_history=organizer_history,
+            )
+        except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+            self._log_provider_skip(message, error)
+            return False
         logger.info(
             "RAG query completed sender=%s chat=%s retrieved_topics=%s "
             "total_messages=%s similarity_scores=%s",
@@ -209,16 +235,12 @@ class KnowledgeBaseAnswers(BaseHandler):
         )
 
         response_text = self._clean_auto_reply_text(generation_result.output)
-        if is_no_answer(response_text):
-            if auto_reply:
-                self._log_auto_reply_skip(message, "model returned NO_ANSWER")
-                return False
-            await self.send_message(
-                message.chat_jid,
-                NO_KB_REPLY,
-                in_reply_to=message.message_id,
-            )
-            return True
+        if not response_text or is_no_answer(response_text):
+            self._log_auto_reply_skip(message, "model returned NO_ANSWER")
+            return False
+        if _NON_ANSWER_REPLY_RE.search(response_text):
+            self._log_auto_reply_skip(message, "model returned non-answer text")
+            return False
         await self.send_message(
             message.chat_jid,
             response_text,
@@ -226,6 +248,15 @@ class KnowledgeBaseAnswers(BaseHandler):
         )
 
         return True
+
+    @staticmethod
+    def _log_provider_skip(message: Message, error: Exception) -> None:
+        logger.warning(
+            "RAG reply skipped chat=%s message=%s reason=provider failure error=%s",
+            message.chat_jid,
+            message.message_id,
+            type(error).__name__,
+        )
 
     @staticmethod
     def _log_auto_reply_skip(message: Message, reason: str) -> None:
@@ -264,6 +295,48 @@ class KnowledgeBaseAnswers(BaseHandler):
             group_jid=group_jid,
             bot_jid=bot_jid,
         )
+
+    async def _recent_organizer_messages(self, message: Message) -> list[Message]:
+        """Load organizer posts from the current group for recap questions."""
+        if not message.group_jid or not _RECAP_RE.search(message.text or ""):
+            return []
+
+        organizer_jids: set[str] = set()
+        if message.group and message.group.owner_jid:
+            organizer_jids.add(message.group.owner_jid)
+        for value in (
+            *(getattr(self.settings, "escalation_primary_jids", []) or []),
+            *(getattr(self.settings, "escalation_secondary_jids", []) or []),
+        ):
+            if str(value).strip():
+                organizer_jids.add(str(value).strip())
+        if not organizer_jids:
+            logger.info(
+                "recap organizer context empty group=%s reason=no organizer identities",
+                message.group_jid,
+            )
+            return []
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+        stmt = (
+            select(Message)
+            .where(Message.group_jid == message.group_jid)
+            .where(Message.timestamp >= cutoff)
+            .order_by(Message.timestamp)
+            .limit(100)
+        )
+        result = await self.session.exec(stmt)
+        messages = [
+            candidate
+            for candidate in result.all()
+            if candidate.sender_jid in organizer_jids and candidate.text
+        ]
+        logger.info(
+            "recap organizer context group=%s messages=%s window_hours=48",
+            message.group_jid,
+            len(messages),
+        )
+        return messages
 
     async def _quoted_document_results(self, message: Message):
         """Return only the quoted document's chunks, or mark an unreadable file."""
@@ -478,6 +551,7 @@ class KnowledgeBaseAnswers(BaseHandler):
         opt_out_map: dict[str, str],
         auto_reply: bool = False,
         weak_match: bool = False,
+        organizer_history: list[Message] | None = None,
     ) -> AgentRunResult[str]:
         sender_user = parse_jid(sender).user
         sender_display = opt_out_map.get(sender_user, f"@{sender_user}")
@@ -490,6 +564,9 @@ class KnowledgeBaseAnswers(BaseHandler):
         
         # Related Topics:
         {topics}
+
+        # Organizer messages from the last 48 hours (use only for recap questions):
+        {chat2text(organizer_history or [], opt_out_map)}
         """
 
         return await run_with_provider_fallback(
