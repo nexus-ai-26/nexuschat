@@ -15,6 +15,8 @@ _TIMESTAMP_RE = re.compile(
     re.IGNORECASE,
 )
 _SENTENCE_SEPARATOR_RE = re.compile(r"(?<=[.!?])\s+")
+_RUN_ON_BULLET_RE = re.compile(r"\s+-\s+(?=\S)")
+_LINK_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 
 
 def clean_visible_reply(text: str, *, max_sentences: int | None = None) -> str:
@@ -25,6 +27,25 @@ def clean_visible_reply(text: str, *, max_sentences: int | None = None) -> str:
     cleaned = _PHONE_NUMBER_RE.sub("", cleaned)
     cleaned = _INTERNAL_MENTION_RE.sub("", cleaned)
     cleaned = _TIMESTAMP_RE.sub("", cleaned)
+    cleaned = cleaned.replace("**", "*")
+    cleaned = _RUN_ON_BULLET_RE.sub("\n- ", cleaned)
+
+    # Keep every URL visually separate so WhatsApp never hides it in a paragraph.
+    links = list(_LINK_RE.finditer(cleaned))
+    if links:
+        parts: list[str] = []
+        cursor = 0
+        for match in links:
+            before = cleaned[cursor : match.start()].rstrip()
+            if before:
+                parts.append(before)
+            parts.append(match.group(0))
+            cursor = match.end()
+        tail = cleaned[cursor:].strip()
+        if tail:
+            parts.append(tail)
+        cleaned = "\n".join(parts)
+
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
