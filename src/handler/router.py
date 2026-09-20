@@ -26,6 +26,15 @@ from .auto_reply import is_clear_banter
 # Creating an object
 logger = logging.getLogger(__name__)
 
+NEXUS_INTRO = (
+    "Hey, I'm Nexus! I'm here to help you catch up on this group's conversations "
+    "and answer questions using the messages saved in our knowledge base.\n\n"
+    "Mention this account and ask a question, or ask me to summarize recent messages. "
+    "I only know the messages available to me, so I'll say when information is missing or uncertain.\n\n"
+    "I can point out obvious filler such as Lorem ipsum. I can't reliably tell whether "
+    "a message was AI-generated just by reading it, and I won't pretend otherwise."
+)
+
 
 _CONTENT_QUESTION_RE = re.compile(
     r"\b(?:quel|quelle|quels|quelles|quand|comment|pourquoi|qui|quoi|"
@@ -143,7 +152,7 @@ class Router(BaseHandler):
     async def about(self, message):
         await self.send_message(
             message.chat_jid,
-            "I'm an open-source bot created for the GenAI Israel community - https://llm.org.il.\nI can help you catch up on the chat messages and answer questions based on the group's knowledge.\nPlease send me PRs and star me at https://github.com/ilanbenb/wa_llm ⭐️",
+            NEXUS_INTRO,
             # in_reply_to=message.message_id,
         )
 

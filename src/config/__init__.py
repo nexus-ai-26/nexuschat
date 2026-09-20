@@ -1,17 +1,17 @@
 import json
 from functools import lru_cache
 from os import environ
-from typing import Annotated, Final, Optional, Self
+from typing import Annotated, Final, Self
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from whatsapp.jid import (
-    parse_jid,
-    JIDParseError,
     DefaultUserServer,
-    LegacyUserServer,
     GroupServer,
+    JIDParseError,
+    LegacyUserServer,
+    parse_jid,
 )
 
 # Provider prefixes this app manages credentials for.
@@ -24,6 +24,7 @@ _MANAGED_PROVIDERS: Final[dict[str, tuple[str, str]]] = {
     "groq": ("groq_api_key", "GROQ_API_KEY"),
     "gemini": ("gemini_api_key", "GEMINI_API_KEY"),
     "nvidia": ("nvidia_api_key", "NVIDIA_API_KEY"),
+    "google-gla": ("google_api_key", "GOOGLE_API_KEY"),
 }
 
 # pydantic-ai still accepts unprefixed legacy names, mapping them to a provider by
@@ -43,31 +44,33 @@ class Settings(BaseSettings):
 
     # WhatsApp settings
     whatsapp_host: str
-    whatsapp_basic_auth_password: Optional[str] = None
-    whatsapp_basic_auth_user: Optional[str] = None
+    whatsapp_basic_auth_password: str | None = None
+    whatsapp_basic_auth_user: str | None = None
 
     # LLM provider credentials. Which one is required depends on the provider
     # `model_name` resolves to — see `validate_model_credentials`.
-    anthropic_api_key: Optional[str] = None
-    openrouter_api_key: Optional[str] = None
-    deepseek_api_key: Optional[str] = None
+    anthropic_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
-    kimi_api_key: Optional[str] = None
+    kimi_api_key: str | None = None
     kimi_base_url: str = "https://api.moonshot.ai/v1"
     kimi_model: str = "kimi-k2-turbo-preview"
-    groq_api_key: Optional[str] = None
-    gemini_api_key: Optional[str] = None
+    groq_api_key: str | None = None
+    gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
-    nvidia_api_key: Optional[str] = None
+    nvidia_api_key: str | None = None
+    google_api_key: str | None = None
 
     # Voyage settings
     voyage_api_key: str
     voyage_max_retries: int = 5
 
     # Model settings
-    model_name: str = "anthropic:claude-sonnet-4-6"
+    model_name: str = "google-gla:gemini-2.5-flash"
     llm_provider_order: str = "deepseek,gemini,kimi,openrouter,nvidia,groq"
+    ai_enabled: bool = True
 
     # Direct Message settings
     dm_autoreply_enabled: bool = False
@@ -184,6 +187,9 @@ class Settings(BaseSettings):
         then its legacy unprefixed names. Providers we don't manage are left alone —
         pydantic-ai is the authority on what it supports and raises its own error.
         """
+        if not self.ai_enabled:
+            return self
+
         model_name = self.model_name.strip()
         provider, sep, _ = model_name.partition(":")
         if not sep:
@@ -237,6 +243,8 @@ class Settings(BaseSettings):
             environ["NVIDIA_API_KEY"] = self.nvidia_api_key
 
         environ["LLM_PROVIDER_ORDER"] = self.llm_provider_order
+        if self.google_api_key:
+            environ["GOOGLE_API_KEY"] = self.google_api_key
 
         if self.logfire_token:
             environ["LOGFIRE_TOKEN"] = self.logfire_token

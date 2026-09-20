@@ -69,7 +69,9 @@ cp .env.example .env
 | `VOYAGE_API_KEY`               | Voyage AI key                                                                      | –                                                            |
 | `DB_URI`                       | PostgreSQL URI                                                                     | `postgresql+asyncpg://user:password@localhost:5432/postgres` |
 | `LOG_LEVEL`                    | Log level (`DEBUG`, `INFO`, `ERROR`)                                               | `INFO`                                                       |
-| `MODEL_NAME`                   | LLM to use, as `provider:model`. Selects which API key is required.                | `anthropic:claude-sonnet-4-6`                                |
+| `MODEL_NAME`                   | LLM to use, as `provider:model`. Selects which API key is required.                | `google-gla:gemini-2.5-flash`                                |
+| `AI_ENABLED`                   | Enable AI replies, moderation, summaries, and knowledge-base ingestion. Set false for setup without an LLM key. | `True` (example config: `false`) |
+| `GOOGLE_API_KEY`               | Google AI Studio key for Gemini. Required when AI is enabled with `google-gla:`. | – |
 | `ANTHROPIC_API_KEY`            | Anthropic API key (starts with `sk-`). Required when `MODEL_NAME` uses `anthropic:`. | –                                                            |
 | `OPENROUTER_API_KEY`           | OpenRouter API key (starts with `sk-or-`). Required when `MODEL_NAME` uses `openrouter:`. | –                                                            |
 | `LOGFIRE_TOKEN`                | Logfire monitoring key, You need to have a real logfire key here                   | –                                                            |
@@ -82,10 +84,13 @@ cp .env.example .env
 
 `MODEL_NAME` decides which LLM the bot talks to, and only the API key for that provider is required.
 
-- **Anthropic (default)** — `MODEL_NAME=anthropic:claude-sonnet-4-6` with `ANTHROPIC_API_KEY`.
+- **Gemini (default)** — `MODEL_NAME=google-gla:gemini-2.5-flash` with `GOOGLE_API_KEY`.
+- **Anthropic** — `MODEL_NAME=anthropic:claude-sonnet-4-6` with `ANTHROPIC_API_KEY`.
 - **OpenRouter** — `MODEL_NAME=openrouter:<vendor>/<model>` (e.g. `openrouter:anthropic/claude-sonnet-4.6`) with `OPENROUTER_API_KEY`. `ANTHROPIC_API_KEY` is then not needed at all.
 
-A mismatch — an `openrouter:` model with no `OPENROUTER_API_KEY`, say — fails at startup with an explicit error rather than on the first message.
+For setup without an AI key, set `AI_ENABLED=false`. The backend still connects to WhatsApp and stores incoming messages, but skips AI replies and moderation. Summary and knowledge-base ingestion endpoints return HTTP 503 with an explanatory message. Set `GOOGLE_API_KEY` and `AI_ENABLED=true`, then recreate the backend container to enable Gemini. Embeddings still use `VOYAGE_API_KEY`.
+
+When AI is enabled, a mismatch — an `openrouter:` model with no `OPENROUTER_API_KEY`, say — fails at startup with an explicit error rather than on the first message.
 
 ### 3. Starting the Services
 

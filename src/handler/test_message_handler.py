@@ -1,17 +1,16 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-
-from handler import MessageHandler
+from config import Settings
 from handler.auto_reply import auto_reply_limiter
 from handler.escalation import offer_escalation, reset_pending_escalations
 from gowa_sdk.webhooks import WebhookEnvelope
 from models import Group, Message
+from handler import MessageHandler
 from test_utils.mock_session import AsyncSessionMock
 from whatsapp import SendMessageRequest
 from whatsapp.jid import JID
-from config import Settings
 
 
 @pytest.fixture
@@ -35,6 +34,7 @@ def mock_settings():
         model_name="test-model",
         dm_autoreply_enabled=False,
         auto_reply_groups=[],
+        ai_enabled=True,
     )
 
 
@@ -65,7 +65,7 @@ async def test_message_handler_dm_opt_out(
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",  # DM: sender == chat (usually, but logic checks message.group)
         text="opt-out",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     # Ensure message.group is None for DM check
     # In the code: if message and not message.group:
@@ -85,7 +85,7 @@ async def test_message_handler_dm_opt_out(
                 "chat_id": "user@s.whatsapp.net",
                 "from": "user@s.whatsapp.net",
                 "from_name": "User",
-                "timestamp": datetime.now(timezone.utc),
+                "timestamp": datetime.now(UTC),
                 "body": "opt-out",
             },
         }
@@ -127,7 +127,7 @@ async def test_message_handler_dm_opt_in(
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
         text="opt-in",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     handler.store_message = AsyncMock(return_value=test_message)
 
@@ -139,7 +139,7 @@ async def test_message_handler_dm_opt_in(
                 "chat_id": "user@s.whatsapp.net",
                 "from": "user@s.whatsapp.net",
                 "from_name": "User",
-                "timestamp": datetime.now(timezone.utc),
+                "timestamp": datetime.now(UTC),
                 "body": "opt-in",
             },
         }
@@ -187,7 +187,7 @@ async def test_message_handler_dm_status(
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
         text="status",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     handler.store_message = AsyncMock(return_value=test_message)
 
@@ -199,7 +199,7 @@ async def test_message_handler_dm_status(
                 "chat_id": "user@s.whatsapp.net",
                 "from": "user@s.whatsapp.net",
                 "from_name": "User",
-                "timestamp": datetime.now(timezone.utc),
+                "timestamp": datetime.now(UTC),
                 "body": "status",
             },
         }
@@ -235,7 +235,7 @@ def _group_payload(
                 "chat_id": "g@g.us",
                 "from": "user@s.whatsapp.net",
                 "from_name": "User",
-                "timestamp": datetime.now(timezone.utc),
+                "timestamp": datetime.now(UTC),
                 "body": body,
                 "from_me": from_me,
             },
@@ -253,7 +253,7 @@ def _managed_group_message(
         sender_jid="user@s.whatsapp.net",
         group_jid="g@g.us",
         text=text,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     message.group = group
     return message
@@ -497,7 +497,7 @@ async def test_private_chat_uses_the_full_router_pipeline(
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
         text="How do I access the platform?",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     handler.store_message = AsyncMock(return_value=private_message)
 
@@ -509,7 +509,7 @@ async def test_private_chat_uses_the_full_router_pipeline(
                     "id": "private-1",
                     "chat_id": "user@s.whatsapp.net",
                     "from": "user@s.whatsapp.net",
-                    "timestamp": datetime.now(timezone.utc),
+                    "timestamp": datetime.now(UTC),
                     "body": private_message.text,
                 },
             }
@@ -554,7 +554,7 @@ async def test_escalation_status_question_never_reaches_router(
                 "id": "pending-status",
                 "chat_id": "user@s.whatsapp.net",
                 "from": "user@s.whatsapp.net",
-                "timestamp": datetime.now(timezone.utc),
+                "timestamp": datetime.now(UTC),
                 "body": status_message.text,
             },
         }
@@ -564,3 +564,37 @@ async def test_escalation_status_question_never_reaches_router(
 
     handler.router.assert_not_awaited()
     assert "waiting" in handler.send_message.await_args_list[-1].args[1]
+
+
+@pytest.mark.asyncio
+async def test_ai_disabled_still_stores_group_messages(
+    mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+):
+    mock_settings.ai_enabled = False
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    message = Message(
+        message_id="disabled-ai-test",
+        chat_jid="123@g.us",
+        sender_jid="user@s.whatsapp.net",
+        text="@bot summarize this",
+        timestamp=datetime.now(UTC),
+    )
+    message.group = Group(group_jid="123@g.us", managed=True)
+    handler.store_message = AsyncMock(return_value=message)
+    handler.router = AsyncMock()
+    handler.kb_qa_handler = AsyncMock()
+    handler.whatsapp_group_link_spam = AsyncMock()
+    payload = WebhookEnvelope.model_validate(
+        {"event": "message", "payload": {"id": "disabled-ai-test"}}
+    )
+
+    await handler(payload)
+
+    handler.store_message.assert_awaited_once_with(payload)
+    mock_session.commit.assert_awaited()
+    handler.router.assert_not_awaited()
+    handler.kb_qa_handler.assert_not_awaited()
+    handler.whatsapp_group_link_spam.assert_not_awaited()
+    mock_whatsapp.send_message.assert_not_awaited()

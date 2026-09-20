@@ -1,32 +1,33 @@
 import asyncio
 import logging
+import re
+from urllib.parse import urlparse
 
 from cachetools import TTLCache
+from gowa_sdk.webhooks import WebhookEnvelope
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
 
 from config import Settings
-from handler.router import Router
-from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
-from handler.kb_qa import KBQAHandler
-from gowa_sdk.webhooks import WebhookEnvelope
-from whatsapp import WhatsAppClient
-from .base_handler import BaseHandler
-from models import BaseGroup, Group, Message, OptOut
-from .auto_reply import (
+from handler.auto_reply import (
     auto_reply_limiter,
     auto_reply_question_rule,
     auto_reply_text_skip_reason,
 )
-from .escalation import (
+from handler.escalation import (
     handle_pending_confirmation,
-    is_human_request,
     is_escalation_status_question,
+    is_human_request,
     offer_escalation,
     pending_status_message,
 )
-from urllib.parse import urlparse
-import re
+from handler.kb_qa import KBQAHandler
+from handler.router import Router
+from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
+from models import BaseGroup, Group, Message, OptOut
+from whatsapp import WhatsAppClient
+
+from .base_handler import BaseHandler
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class MessageHandler(BaseHandler):
         # back the stored message (it would be lost for the daily summary).
         await self.session.commit()
 
-        # ignore messages that don't exist or don't have text
+        # Ignore messages that don't exist.
         if not message:
             return
 
@@ -83,6 +84,11 @@ class MessageHandler(BaseHandler):
         my_jid = await self.whatsapp.get_my_jid()
         if message.sender_jid == my_jid.normalize_str():
             return
+
+        if message.sender_jid.endswith("@lid"):
+            logger.info(
+                f"Received message from {message.sender_jid}: {payload.model_dump_json()}"
+            )
 
         if not message.group and is_escalation_status_question(message.text):
             await self.send_message(message.chat_jid, pending_status_message(message))
@@ -109,11 +115,14 @@ class MessageHandler(BaseHandler):
             await self.router(message)
             return
 
+        if not self.settings.ai_enabled:
+            return
+
         # In-memory dedupe: if this message is already being processed/recently processed, skip
         if message and message.message_id:
             async with _processing_lock:
                 if message.message_id in _processing_cache:
-                    logging.info(
+                    logger.info(
                         f"Message {message.message_id} already in processing cache; skipping."
                     )
                     return
