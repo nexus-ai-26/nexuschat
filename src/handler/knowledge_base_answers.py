@@ -237,6 +237,13 @@ class KnowledgeBaseAnswers(BaseHandler):
         response_text = self._clean_auto_reply_text(generation_result.output)
         if not response_text or is_no_answer(response_text):
             self._log_auto_reply_skip(message, "model returned NO_ANSWER")
+            if not message.chat_jid.endswith("@g.us"):
+                await self.send_message(
+                    message.chat_jid,
+                    "I don't have that detail yet. Please ask the organizers, and I'll gladly help with anything about sessions, deadlines, MIT, Wadhwani or links.",
+                    in_reply_to=message.message_id,
+                )
+                return True
             return False
         if _NON_ANSWER_REPLY_RE.search(response_text):
             self._log_auto_reply_skip(message, "model returned non-answer text")

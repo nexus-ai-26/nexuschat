@@ -106,6 +106,42 @@ class Router(BaseHandler):
             )
             return
 
+        if not message.chat_jid.endswith("@g.us"):
+            import re as _re
+            import time as _time
+
+            _text = (message.text or "").strip()
+            if _re.fullmatch(
+                r"(?i)(?:hi+|hello+|hey+|hola|bonjour|salut|greetings|yo|good\s+(?:morning|afternoon|evening|day))(?:\s+(?:there|all|everyone|nexus|bot))?[\W_]*",
+                _text,
+            ):
+                await self.send_message(
+                    message.chat_jid,
+                    "Hi \U0001F44B I'm the UniPods METI AI programme assistant, Nexus bot. Ask me anything about the programme \u2014 sessions, deadlines, MIT, Wadhwani, links \u2014 and I'll help.",
+                    in_reply_to=message.message_id,
+                )
+                return
+            if _re.fullmatch(
+                r"(?i)(?:thanks?|thank\s+you|thx|merci)(?:\s+(?:so\s+much|a\s+lot|nexus|bot))?[\W_]*",
+                _text,
+            ):
+                await self.send_message(
+                    message.chat_jid,
+                    "You're welcome! Let me know if you need anything else about the programme.",
+                    in_reply_to=message.message_id,
+                )
+                return
+            if silent_message_reason(message.text):
+                _seen = globals().setdefault("_DM_NUDGE_AT", {})
+                _now = _time.monotonic()
+                if _now - _seen.get(message.chat_jid, -1e9) > 300:
+                    _seen[message.chat_jid] = _now
+                    await self.send_message(
+                        message.chat_jid,
+                        "I'm here to help with the UniPods METI programme. Ask me about sessions, deadlines, MIT, Wadhwani, the hackathon or links, and I'll answer right away.",
+                        in_reply_to=message.message_id,
+                    )
+                return
         reason = silent_message_reason(message.text)
         if reason:
             logger.info(
