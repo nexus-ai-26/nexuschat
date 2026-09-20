@@ -315,7 +315,9 @@ class CatchupService:
         try:
             devices = await whatsapp.list_devices()
             if devices.results:
-                self._device_id = getattr(devices.results[0], "device_id", None)
+                self._device_id = getattr(
+                    devices.results[0], "device_id", None
+                ) or getattr(devices.results[0], "id", None)
         except Exception as error:
             logger.warning(
                 "Catch-up device scope unavailable error=%s",
