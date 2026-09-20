@@ -15,8 +15,9 @@ from sqlmodel import select
 
 from config import Settings
 from handler.base_handler import BaseHandler
-from models import Group, Message
+from models import CatchupAttempt, Group, Message
 from services.webhook_processing import process_webhook_message
+from utils.llm_provider import provider_rate_limit_recently
 from whatsapp import WhatsAppClient
 from whatsapp.jid import normalize_jid
 
@@ -41,8 +42,9 @@ class CatchupStats:
     skipped: int = 0
     errors: int = 0
     source: str = "none"
+    skipped_reason: str | None = None
 
-    def as_dict(self) -> dict[str, int | str]:
+    def as_dict(self) -> dict[str, int | str | None]:
         return {
             "groups": self.groups,
             "recovered": self.recovered,
@@ -52,6 +54,7 @@ class CatchupStats:
             "skipped": self.skipped,
             "errors": self.errors,
             "source": self.source,
+            "skipped_reason": self.skipped_reason,
         }
 
 
@@ -253,11 +256,47 @@ class CatchupService:
         )
         return {str(row) for row in result.all() if row}
 
+    async def _successful_attempt_ids(self, session) -> set[str]:
+        result = await session.exec(
+            select(CatchupAttempt.message_id).where(CatchupAttempt.status == "answered")
+        )
+        return {str(row) for row in result.all() if row}
+
+    async def _begin_attempt(self, session, message_id: str) -> None:
+        attempt = await session.get(CatchupAttempt, message_id)
+        if attempt is None:
+            session.add(CatchupAttempt(message_id=message_id))
+        else:
+            attempt.attempted_at = datetime.now(timezone.utc)
+            attempt.status = "attempted"
+            attempt.attempt_count += 1
+            attempt.last_error = None
+        await session.commit()
+
+    async def _finish_attempt(
+        self, session, message_id: str, *, answered: bool, error: str | None = None
+    ) -> None:
+        attempt = await session.get(CatchupAttempt, message_id)
+        if attempt is None:
+            attempt = CatchupAttempt(message_id=message_id)
+            session.add(attempt)
+        attempt.status = "answered" if answered else "failed"
+        attempt.last_error = error
+        attempt.attempted_at = datetime.now(timezone.utc)
+        await session.commit()
+
     async def run(self) -> CatchupStats:
         stats = CatchupStats()
         now = datetime.now(timezone.utc)
         start = now - timedelta(hours=self.settings.catchup_window_hours)
         whatsapp: WhatsAppClient = self.app.state.whatsapp
+
+        if provider_rate_limit_recently(300.0):
+            stats.skipped_reason = "recent_provider_rate_limit"
+            logger.warning(
+                "Catch-up skipped reason=recent_provider_rate_limit window_seconds=300"
+            )
+            return stats
 
         try:
             bot_jid = (await whatsapp.get_my_jid()).normalize_str()
@@ -273,6 +312,7 @@ class CatchupService:
             groups = await self._served_groups(session)
             stats.groups = len(groups)
             answered_ids = await self._answered_ids(session, bot_jid, start)
+            answered_ids.update(await self._successful_attempt_ids(session))
             db_messages: list[Message] = []
             for group_jid in groups:
                 result = await session.exec(
@@ -353,8 +393,12 @@ class CatchupService:
 
         for index, message in enumerate(to_answer):
             async with self.app.state.async_session() as check_session:
-                if message.message_id in await self._answered_ids(
+                current_answered = await self._answered_ids(
                     check_session, bot_jid, start
+                )
+                attempt = await check_session.get(CatchupAttempt, message.message_id)
+                if message.message_id in current_answered or (
+                    attempt is not None and attempt.status == "answered"
                 ):
                     stats.already_answered += 1
                     logger.info(
@@ -362,16 +406,30 @@ class CatchupService:
                         message.message_id,
                     )
                     continue
+                await self._begin_attempt(check_session, message.message_id)
 
             logger.info("Catch-up message_id=%s answered=false", message.message_id)
             try:
-                await process_webhook_message(self.app, _message_envelope(message))
+                processed = await process_webhook_message(
+                    self.app,
+                    _message_envelope(message),
+                    send_failure_reply=False,
+                )
                 async with self.app.state.async_session() as check_session:
                     answered_now = message.message_id in await self._answered_ids(
                         check_session, bot_jid, start
                     )
-                if answered_now:
+                    await self._finish_attempt(
+                        check_session,
+                        message.message_id,
+                        answered=processed and answered_now,
+                        error=None
+                        if processed and answered_now
+                        else "processing_failed",
+                    )
+                if processed and answered_now:
                     stats.answered += 1
+                    answered_ids.add(message.message_id)
                 else:
                     stats.errors += 1
                 logger.info(
@@ -381,6 +439,13 @@ class CatchupService:
                 )
             except Exception as error:
                 stats.errors += 1
+                async with self.app.state.async_session() as error_session:
+                    await self._finish_attempt(
+                        error_session,
+                        message.message_id,
+                        answered=False,
+                        error=type(error).__name__,
+                    )
                 logger.error(
                     "Catch-up message_id=%s answered=false error=%s",
                     message.message_id,

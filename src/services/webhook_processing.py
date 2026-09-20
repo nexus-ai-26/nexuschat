@@ -95,7 +95,7 @@ async def process_webhook_message(
     payload: WebhookEnvelope,
     *,
     send_failure_reply: bool = True,
-) -> None:
+) -> bool:
     """Process one queued webhook with bounded agent concurrency and a deadline."""
     settings: Settings = app.state.settings
     try:
@@ -110,6 +110,7 @@ async def process_webhook_message(
                 ),
                 timeout=settings.reply_deadline_seconds,
             )
+            return True
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -124,7 +125,7 @@ async def process_webhook_message(
                 "Failure reply suppressed reason=catchup chat=%s",
                 webhook_chat_key(payload),
             )
-            return
+            return False
         chat_key = webhook_chat_key(payload)
         cooldown = float(
             getattr(settings, "failure_reply_cooldown_seconds", 600.0)
@@ -134,13 +135,14 @@ async def process_webhook_message(
                 "Failure reply suppressed chat=%s reason=cooldown",
                 chat_key,
             )
-            return
+            return False
         await _send_failure_reply(
             payload,
             async_session=app.state.async_session,
             whatsapp=app.state.whatsapp,
             embedding_client=app.state.embedding_client,
         )
+        return False
 
 
 async def process_group_sync(app: Any, payload: WebhookEnvelope) -> None:

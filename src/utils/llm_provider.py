@@ -32,6 +32,7 @@ CIRCUIT_BREAKER_SECONDS = 60 * 60
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 DEFAULT_PROVIDER_ORDER = "openai,deepseek,gemini,kimi,openrouter,nvidia,groq"
 _provider_circuit_open_until: dict[str, float] = {}
+_provider_rate_limited_at: dict[str, float] = {}
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -87,6 +88,12 @@ def _provider_is_circuit_open(provider: str) -> bool:
     return _provider_circuit_open_until.get(provider, 0.0) > time.monotonic()
 
 
+def provider_rate_limit_recently(window_seconds: float = 300.0) -> bool:
+    """Return whether any provider was rate limited during the recent window."""
+    now = time.monotonic()
+    return any(now - timestamp <= window_seconds for timestamp in _provider_rate_limited_at.values())
+
+
 def _retry_after_seconds(error: Exception) -> float | None:
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None)
@@ -127,6 +134,7 @@ def _open_provider_circuit(
                 int(cooldown),
             )
     elif status_code == 429:
+        _provider_rate_limited_at[provider] = now
         cooldown = _retry_after_seconds(error)
         if cooldown is None:
             cooldown = float(

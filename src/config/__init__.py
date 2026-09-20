@@ -114,8 +114,8 @@ class Settings(BaseSettings):
     send_retry_attempts: int = 3
     send_retry_base_seconds: float = 0.5
     failure_reply_cooldown_seconds: float = 600.0
-    catchup_window_hours: float = 6.0
-    catchup_max_replies: int = 20
+    catchup_window_hours: float = 1.0
+    catchup_max_replies: int = 5
     catchup_delay_seconds: float = 2.5
     catchup_start_delay_seconds: float = 30.0
     catchup_admin_secret: str | None = None

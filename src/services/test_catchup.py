@@ -1,11 +1,17 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import pytest
+
+from models import CatchupAttempt
 from models import Message
 from services.catchup import (
+    CatchupService,
     find_unanswered_mentions,
     select_catchup_candidates,
     valid_admin_secret,
 )
+from utils.llm_provider import _provider_rate_limited_at, provider_rate_limit_recently
 
 
 BOT_JID = "999@s.whatsapp.net"
@@ -120,3 +126,44 @@ def test_admin_secret_requires_configured_value():
     assert valid_admin_secret("catch-up-secret", "catch-up-secret")
     assert not valid_admin_secret("wrong", "catch-up-secret")
     assert not valid_admin_secret("catch-up-secret", None)
+
+
+def test_recent_provider_rate_limit_blocks_catchup():
+    import time
+
+    _provider_rate_limited_at["deepseek"] = time.monotonic()
+    assert provider_rate_limit_recently(300)
+    _provider_rate_limited_at.clear()
+
+
+def test_catchup_defaults_are_stale_question_safe():
+    from config import Settings
+
+    assert Settings.model_fields["catchup_window_hours"].default == 1.0
+    assert Settings.model_fields["catchup_max_replies"].default == 5
+
+
+@pytest.mark.asyncio
+async def test_catchup_records_failed_attempt_without_marking_answered():
+    class Session:
+        def __init__(self):
+            self.rows: dict[str, CatchupAttempt] = {}
+
+        async def get(self, model, message_id):
+            return self.rows.get(message_id)
+
+        def add(self, row):
+            self.rows[row.message_id] = row
+
+        async def commit(self):
+            return None
+
+    session = Session()
+    service = CatchupService(SimpleNamespace(state=SimpleNamespace()))
+    await service._begin_attempt(session, "failed-message")
+    await service._finish_attempt(
+        session, "failed-message", answered=False, error="ProviderFallbackError"
+    )
+
+    assert session.rows["failed-message"].status == "failed"
+    assert session.rows["failed-message"].last_error == "ProviderFallbackError"

@@ -12,7 +12,9 @@ from utils.llm_provider import (
     ProviderFallbackError,
     _openai_direct_model,
     _provider_circuit_open_until,
+    _provider_rate_limited_at,
     _model_chain,
+    provider_rate_limit_recently,
     run_with_provider_fallback,
 )
 
@@ -20,8 +22,10 @@ from utils.llm_provider import (
 @pytest.fixture(autouse=True)
 def reset_provider_circuits():
     _provider_circuit_open_until.clear()
+    _provider_rate_limited_at.clear()
     yield
     _provider_circuit_open_until.clear()
+    _provider_rate_limited_at.clear()
 
 
 def settings(**overrides: object) -> SimpleNamespace:
@@ -61,6 +65,11 @@ async def test_primary_succeeds():
 
     assert result.output == "primary response"
     run.assert_awaited_once_with("question")
+
+
+def test_recent_rate_limit_state_is_visible_to_catchup():
+    _provider_rate_limited_at["deepseek"] = time.monotonic()
+    assert provider_rate_limit_recently(300)
 
 
 @pytest.mark.asyncio
@@ -152,7 +161,13 @@ async def test_permanent_provider_errors_open_one_hour_circuit(
 
     assert result.output == "fallback response"
     assert _provider_circuit_open_until["deepseek"] > 0
-    assert sum("Provider circuit opened provider=deepseek" in r.message for r in caplog.records) == 1
+    assert (
+        sum(
+            "Provider circuit opened provider=deepseek" in r.message
+            for r in caplog.records
+        )
+        == 1
+    )
 
 
 class _RetryAfterError(Exception):
