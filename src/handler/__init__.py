@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import inspect
 import logging
 import re
@@ -106,7 +106,7 @@ class MessageHandler(BaseHandler):
 
         # direct message
         if message and not message.group:
-            await self._send_private_opening_once(message)
+            pass
             command = message.text.strip().lower()
             if command == "opt-out":
                 await self.handle_opt_out(message)
@@ -303,3 +303,4 @@ class MessageHandler(BaseHandler):
             message.chat_jid,
             status,
         )
+
