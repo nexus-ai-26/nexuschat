@@ -353,6 +353,48 @@ async def test_router_answers_clear_banter_without_llm(
 
 
 @pytest.mark.asyncio
+async def test_fixed_bot_reply_only_matches_assistant_questions(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.send_message = AsyncMock()
+    router.ask_knowledge_base = AsyncMock()
+    router._route = AsyncMock(return_value=IntentEnum.ask_question)
+
+    programme_questions = [
+        "how many teams ( for bot hackathon) that still need someone",
+        "what is this hackathon about?",
+    ]
+    for index, text in enumerate(programme_questions):
+        message = Message(
+            message_id=f"programme-{index}",
+            text=text,
+            chat_jid="user@s.whatsapp.net",
+            sender_jid="user@s.whatsapp.net",
+        )
+        await router(message)
+
+    assert router.send_message.await_count == 0
+    assert router.ask_knowledge_base.await_count == 2
+
+    router.ask_knowledge_base.reset_mock()
+    await router(
+        Message(
+            message_id="assistant-question",
+            text="who are you",
+            chat_jid="user@s.whatsapp.net",
+            sender_jid="user@s.whatsapp.net",
+        )
+    )
+
+    router.send_message.assert_awaited_once()
+    router.ask_knowledge_base.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_router_routes_french_content_question_to_knowledge_base(
     mock_session: AsyncSessionMock,
     mock_whatsapp: AsyncMock,

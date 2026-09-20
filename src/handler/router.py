@@ -38,7 +38,9 @@ BOT_FIXED_REPLY = (
     "I answer questions only from the programme materials."
 )
 _BOT_QUESTION_RE = re.compile(
-    r"\b(?:bot|bots|nexus|who are you|what can you do|tell me about (?:yourself|you))\b",
+    r"^\s*(?:@\S+\s+)*(?:who\s+are\s+you|are\s+you\s+(?:a\s+)?bot|"
+    r"what\s+can\s+you\s+do|which\s+bots?\s+are\s+running|"
+    r"what(?:'s|\s+is)\s+about\s+nexus)\s*[?!.,]*\s*$",
     re.IGNORECASE,
 )
 
@@ -90,7 +92,7 @@ class Router(BaseHandler):
         if not message.text:
             return
 
-        if _BOT_QUESTION_RE.search(message.text):
+        if _BOT_QUESTION_RE.fullmatch(message.text):
             await self.send_message(
                 message.chat_jid,
                 BOT_FIXED_REPLY,
