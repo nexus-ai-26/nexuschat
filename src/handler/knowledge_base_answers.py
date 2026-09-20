@@ -48,7 +48,8 @@ _FILE_REQUEST_RE = re.compile(
 _MAX_FORWARD_BYTES = 25 * 1024 * 1024
 NO_KB_REPLY = (
     "I don't have that in the programme materials, so I'd rather not guess. "
-    "Please check with the organizers."
+    "Please check with the organizers.\n"
+    "Would you like me to flag this to the organizers?"
 )
 
 

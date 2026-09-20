@@ -108,13 +108,6 @@ class Router(BaseHandler):
             )
             return
 
-        if is_clear_banter(message.text):
-            await self.send_message(
-                message.chat_jid,
-                "😄 I’m filing that under *excellent banter*. Ask me a real question when you’re ready!",
-            )
-            return
-
         if _looks_like_content_question(message.text):
             await self.ask_knowledge_base(message)
             return
@@ -186,6 +179,6 @@ class Router(BaseHandler):
     async def default_response(self, message):
         await self.send_message(
             message.chat_jid,
-            "I'm sorry, but I dont think this is something I can help with right now 😅.\n I can help catch up on the chat messages or answer questions based on the group's knowledge.",
+            "Please ask a specific question about the programme materials.",
             in_reply_to=message.message_id,
         )

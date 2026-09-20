@@ -286,3 +286,56 @@ async def test_quoted_document_question_uses_document_content_first():
     handler.generation_agent.assert_awaited_once()
     assert "two-page proposal" in handler.generation_agent.await_args.args[1]
     handler.send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_distinct_group_questions_produce_distinct_answers():
+    session = AsyncSessionMock()
+    session.exec = AsyncMock(side_effect=[_empty_result(), _empty_result()])
+    whatsapp = AsyncMock()
+    whatsapp.get_my_jid = AsyncMock(
+        return_value=JID(user="bot", server="s.whatsapp.net")
+    )
+    handler = KnowledgeBaseAnswers(
+        session, whatsapp, AsyncMock(), SimpleNamespace(spec=Settings)
+    )
+    first = _message(message_id="admins-question", text="Who are the admins?")
+    second = _message(message_id="deadline-question", text="When does it start?")
+    handler.rephrasing_agent = AsyncMock(
+        side_effect=[
+            AgentRunResult(output="admins"),
+            AgentRunResult(output="start date"),
+        ]
+    )
+    handler.generation_agent = AsyncMock(
+        side_effect=[
+            AgentRunResult(
+                output="1. The admins are listed in the programme materials."
+            ),
+            AgentRunResult(output="2. The programme starts on 1 October."),
+        ]
+    )
+
+    with (
+        patch(
+            "handler.knowledge_base_answers.get_opt_out_map",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "handler.knowledge_base_answers.voyage_embed_text",
+            new=AsyncMock(return_value=[[0.1] * 1024]),
+        ),
+        patch(
+            "search.hybrid_search.hybrid_search",
+            new=AsyncMock(return_value=[_result(0.2)]),
+        ),
+    ):
+        handler.send_message = AsyncMock()
+        assert await handler(first) is True
+        assert await handler(second) is True
+
+    answers = [call.args[1] for call in handler.send_message.await_args_list]
+    assert answers == [
+        "1. The admins are listed in the programme materials.",
+        "2. The programme starts on 1 October.",
+    ]
