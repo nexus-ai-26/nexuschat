@@ -25,6 +25,7 @@ from handler.kb_qa import KBQAHandler
 from handler.router import Router
 from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
 from models import BaseGroup, Group, Message, OptOut
+from services.document_ingestion import index_document
 from whatsapp import WhatsAppClient
 
 from .base_handler import BaseHandler
@@ -70,11 +71,6 @@ class MessageHandler(BaseHandler):
         if auto_reply_group:
             await self._ensure_active_group(message)
 
-        if not message.text:
-            if auto_reply_group:
-                self._log_auto_reply_skip(group_jid, "no text")
-            return
-
         if self._payload_from_me(payload) or bool(getattr(message, "from_me", False)):
             if auto_reply_group:
                 self._log_auto_reply_skip(group_jid, "from_me")
@@ -83,6 +79,22 @@ class MessageHandler(BaseHandler):
         # Ignore messages sent by the bot itself
         my_jid = await self.whatsapp.get_my_jid()
         if message.sender_jid == my_jid.normalize_str():
+            return
+
+        # Index documents before routing any follow-up question. This also handles
+        # file-only messages, which have no text until extraction succeeds.
+        if message.group_jid:
+            await index_document(
+                self.session,
+                self.embedding_client,
+                self.whatsapp,
+                message,
+                payload=payload,
+            )
+
+        if not message.text:
+            if auto_reply_group:
+                self._log_auto_reply_skip(group_jid, "no text")
             return
 
         if message.sender_jid.endswith("@lid"):

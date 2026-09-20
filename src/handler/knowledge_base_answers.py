@@ -28,6 +28,11 @@ from .auto_reply import (
 from .base_handler import BaseHandler
 from config import Settings
 from services.prompt_manager import prompt_manager
+from services.document_ingestion import (
+    document_topics_for_message,
+    index_document,
+    is_supported_document,
+)
 from utils.llm_provider import run_with_provider_fallback
 from utils.reply_text import clean_visible_reply
 
@@ -99,46 +104,42 @@ class KnowledgeBaseAnswers(BaseHandler):
         # Release any DB transaction/connection before the first provider call.
         await self.session.commit()
 
-        rephrased_result = await self.rephrasing_agent(
-            my_jid.user, message, history, opt_out_map
-        )
-        # Get query embedding
-        embedded_question = (
-            await voyage_embed_text(self.embedding_client, [rephrased_result.output])
-        )[0]
-
-        # Determine which groups to search
-        group_jids = None
-        if message.group:
-            group_jids = [message.group.group_jid]
-            if message.group.community_keys:
-                related_groups = await message.group.get_related_community_groups(
-                    self.session
-                )
-                group_jids.extend([g.group_jid for g in related_groups])
-
-        # Use hybrid search to get topics with their source messages
         from search.hybrid_search import format_search_results_for_prompt, hybrid_search
 
-        search_results = await hybrid_search(
-            session=self.session,
-            query=message.text,
-            query_embedding=embedded_question,
-            group_jids=group_jids,
-            vector_limit=10,
-            messages_per_topic=5,
-        )
-        search_results = self._filter_auto_reply_results(
-            search_results,
-            current_question=message.text,
-            current_sender=message.sender_jid,
-            group_jid=message.group_jid,
-            bot_jid=bot_jid,
-        )
+        document_results, document_error = await self._quoted_document_results(message)
+        if document_error:
+            await self.send_message(
+                message.chat_jid,
+                "I can't read that file. Please paste the relevant section.",
+                in_reply_to=message.message_id,
+            )
+            return True
 
-        weak_match_context = False
-        if not has_confident_match(search_results):
-            weak_match_context = True
+        if document_results:
+            # A quoted document is the authoritative source for this question.
+            # Do not mix unrelated group links or conversation gossip into it.
+            search_results = document_results
+            weak_match_context = False
+        else:
+            rephrased_result = await self.rephrasing_agent(
+                my_jid.user, message, history, opt_out_map
+            )
+            embedded_question = (
+                await voyage_embed_text(
+                    self.embedding_client, [rephrased_result.output]
+                )
+            )[0]
+
+            # Determine which groups to search
+            group_jids = None
+            if message.group:
+                group_jids = [message.group.group_jid]
+                if message.group.community_keys:
+                    related_groups = await message.group.get_related_community_groups(
+                        self.session
+                    )
+                    group_jids.extend([g.group_jid for g in related_groups])
+
             search_results = await hybrid_search(
                 session=self.session,
                 query=message.text,
@@ -146,7 +147,6 @@ class KnowledgeBaseAnswers(BaseHandler):
                 group_jids=group_jids,
                 vector_limit=10,
                 messages_per_topic=5,
-                max_vector_distance=0.6,
             )
             search_results = self._filter_auto_reply_results(
                 search_results,
@@ -155,6 +155,25 @@ class KnowledgeBaseAnswers(BaseHandler):
                 group_jid=message.group_jid,
                 bot_jid=bot_jid,
             )
+            weak_match_context = False
+            if not has_confident_match(search_results):
+                weak_match_context = True
+                search_results = await hybrid_search(
+                    session=self.session,
+                    query=message.text,
+                    query_embedding=embedded_question,
+                    group_jids=group_jids,
+                    vector_limit=10,
+                    messages_per_topic=5,
+                    max_vector_distance=0.6,
+                )
+                search_results = self._filter_auto_reply_results(
+                    search_results,
+                    current_question=message.text,
+                    current_sender=message.sender_jid,
+                    group_jid=message.group_jid,
+                    bot_jid=bot_jid,
+                )
         # Search is complete; do not retain a DB connection while generating.
         await self.session.commit()
 
@@ -244,6 +263,37 @@ class KnowledgeBaseAnswers(BaseHandler):
             group_jid=group_jid,
             bot_jid=bot_jid,
         )
+
+    async def _quoted_document_results(self, message: Message):
+        """Return only the quoted document's chunks, or mark an unreadable file."""
+        if not message.reply_to_id:
+            return [], False
+        source = await self.session.get(Message, message.reply_to_id)
+        await self.session.commit()
+        if source is None or not is_supported_document(source):
+            return [], False
+
+        topics = await document_topics_for_message(self.session, source.message_id)
+        await self.session.commit()
+        extracted_marker = "\n\n" not in (source.text or "")
+        if extracted_marker or not topics:
+            await index_document(
+                self.session,
+                self.embedding_client,
+                self.whatsapp,
+                source,
+            )
+            topics = await document_topics_for_message(self.session, source.message_id)
+        await self.session.commit()
+        if not topics:
+            return [], True
+
+        from search.hybrid_search import SearchResult
+
+        return [
+            SearchResult(topic=topic, messages=[], vector_distance=0.0)
+            for topic in topics
+        ], False
 
     def _configured_kb_exclude_subject_prefixes(self) -> tuple[str, ...]:
         configured = getattr(

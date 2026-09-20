@@ -236,3 +236,53 @@ async def test_mentioned_reply_does_not_append_sources_or_identifiers():
     assert "Sources" not in sent_text
     assert "[1]" not in sent_text
     assert "251911222333" not in sent_text
+
+
+@pytest.mark.asyncio
+async def test_quoted_document_question_uses_document_content_first():
+    session = AsyncSessionMock()
+    session.exec = AsyncMock(return_value=_empty_result())
+    source = _message(
+        message_id="document-1",
+        text="[[Attached Document]] UniPods Hackathon Guidelines.pdf\n\n"
+        "Submit a two-page proposal by 30 September.",
+        media_url="/media/document-1.pdf",
+    )
+    session.get = AsyncMock(return_value=source)
+    whatsapp = AsyncMock()
+    whatsapp.get_my_jid = AsyncMock(
+        return_value=JID(user="bot", server="s.whatsapp.net")
+    )
+    handler = KnowledgeBaseAnswers(
+        session, whatsapp, AsyncMock(), SimpleNamespace(spec=Settings)
+    )
+    handler.generation_agent = AsyncMock(
+        return_value=AgentRunResult(
+            output="Submit a two-page proposal by 30 September."
+        )
+    )
+    question = _message(
+        message_id="question-about-document",
+        reply_to_id="document-1",
+        text="What do we submit, and when is it due?",
+    )
+    document_result = _result(0.0)
+    document_result.topic.summary = "Submit a two-page proposal by 30 September."
+
+    with (
+        patch(
+            "handler.knowledge_base_answers.get_opt_out_map",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "handler.knowledge_base_answers.document_topics_for_message",
+            new=AsyncMock(return_value=[document_result.topic]),
+        ),
+    ):
+        handler.send_message = AsyncMock()
+        answered = await handler(question)
+
+    assert answered is True
+    handler.generation_agent.assert_awaited_once()
+    assert "two-page proposal" in handler.generation_agent.await_args.args[1]
+    handler.send_message.assert_awaited_once()
