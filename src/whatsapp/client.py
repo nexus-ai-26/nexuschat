@@ -16,14 +16,29 @@ class WhatsAppClient(GoWaClient):
         if self._jid:
             return self._jid
 
+        # GoWA v9's /app/devices endpoint returns internal UUIDs. The detailed
+        # /devices endpoint carries the logged-in account JID; keep the legacy
+        # fallback for older bridge versions used by local deployments.
+        try:
+            detailed = await self.list_devices()
+        except Exception:
+            detailed = None
+
+        if detailed and detailed.results:
+            for result in detailed.results:
+                device_jid = getattr(result, "jid", None) or getattr(
+                    result, "phone", None
+                )
+                if device_jid and ("@" in device_jid or device_jid.isnumeric()):
+                    self._jid = parse_jid(device_jid)
+                    return self._jid
+
         info = await self.get_devices()
         if not info.results:
             raise ValueError("No devices found")
-        # Newer gowa versions return the WhatsApp JID in `jid` and an internal
-        # device UUID in `device`; older versions put the JID in `device`.
         result = info.results[0]
         device_jid = getattr(result, "jid", None) or result.device
-        if not device_jid:
-            raise ValueError("No primary device JID found")
+        if not device_jid or ("@" not in device_jid and not device_jid.isnumeric()):
+            raise ValueError("No primary device JID available")
         self._jid = parse_jid(device_jid)
         return self._jid
