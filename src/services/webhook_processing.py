@@ -116,9 +116,10 @@ async def process_webhook_message(
     except Exception as error:
         reason = "deadline" if isinstance(error, asyncio.TimeoutError) else type(error).__name__
         logger.error(
-            "Webhook processing failed event=%s reason=%s; sending fallback",
+            "Webhook processing failed event=%s reason=%s action=%s",
             payload.event,
             reason,
+            "sending_fallback" if send_failure_reply else "no_failure_notice",
         )
         if not send_failure_reply:
             logger.error(
