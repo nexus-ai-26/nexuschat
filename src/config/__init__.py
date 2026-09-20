@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     provider_rate_limit_cooldown_seconds: float = 60.0
     send_retry_attempts: int = 3
     send_retry_base_seconds: float = 0.5
+    failure_reply_cooldown_seconds: float = 600.0
     catchup_window_hours: float = 6.0
     catchup_max_replies: int = 20
     catchup_delay_seconds: float = 2.5

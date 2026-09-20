@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import monotonic
 from typing import Any
 
 from gowa_sdk.webhooks import WebhookEnvelope, WebhookMessagePayload
@@ -22,6 +23,19 @@ logger = logging.getLogger(__name__)
 FALLBACK_REPLY = (
     "I'm having trouble answering right now, please try again in a moment."
 )
+_failure_reply_sent_at: dict[str, float] = {}
+_failure_reply_lock = asyncio.Lock()
+
+
+async def _claim_failure_reply(chat_key: str, cooldown_seconds: float) -> bool:
+    """Claim the one failure notice allowed for a chat during the cooldown."""
+    now = monotonic()
+    async with _failure_reply_lock:
+        last_sent = _failure_reply_sent_at.get(chat_key)
+        if last_sent is not None and now - last_sent < cooldown_seconds:
+            return False
+        _failure_reply_sent_at[chat_key] = now
+        return True
 
 
 def webhook_chat_key(payload: WebhookEnvelope) -> str:
@@ -76,7 +90,12 @@ async def _send_failure_reply(
             )
 
 
-async def process_webhook_message(app: Any, payload: WebhookEnvelope) -> None:
+async def process_webhook_message(
+    app: Any,
+    payload: WebhookEnvelope,
+    *,
+    send_failure_reply: bool = True,
+) -> None:
     """Process one queued webhook with bounded agent concurrency and a deadline."""
     settings: Settings = app.state.settings
     try:
@@ -100,6 +119,22 @@ async def process_webhook_message(app: Any, payload: WebhookEnvelope) -> None:
             payload.event,
             reason,
         )
+        if not send_failure_reply:
+            logger.error(
+                "Failure reply suppressed reason=catchup chat=%s",
+                webhook_chat_key(payload),
+            )
+            return
+        chat_key = webhook_chat_key(payload)
+        cooldown = float(
+            getattr(settings, "failure_reply_cooldown_seconds", 600.0)
+        )
+        if not await _claim_failure_reply(chat_key, cooldown):
+            logger.warning(
+                "Failure reply suppressed chat=%s reason=cooldown",
+                chat_key,
+            )
+            return
         await _send_failure_reply(
             payload,
             async_session=app.state.async_session,
