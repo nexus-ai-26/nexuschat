@@ -1,4 +1,5 @@
 import logging
+import asyncio
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
@@ -123,10 +124,10 @@ class BaseHandler:
                 message = await self.session.get(Message, reaction.message_id)
                 if message is None:
                     logger.warning(
-                        f"Message {reaction.message_id} not found for reaction"
+                        "Skipping orphaned reaction message_id=%s reason=target_not_stored",
+                        reaction.message_id,
                     )
-                    # We could still store the reaction, but log it as orphaned
-                    # return None  # Uncomment to skip storing orphaned reactions
+                    return None
 
                 # Use custom upsert method for reactions
                 stored_reaction = await Reaction.upsert_reaction(self.session, reaction)
@@ -160,13 +161,37 @@ class BaseHandler:
         visible_message = clean_visible_reply(message) if sanitize else message
         assert visible_message, "message is empty after cleanup"
 
-        resp = await self.whatsapp.send_message(
-            SendMessageRequest(
-                phone=to_jid,
-                message=visible_message,
-                reply_message_id=in_reply_to,
-            )
+        attempts = max(1, int(getattr(getattr(self, "settings", None), "send_retry_attempts", 3)))
+        base_delay = float(
+            getattr(getattr(self, "settings", None), "send_retry_base_seconds", 0.5)
         )
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = await self.whatsapp.send_message(
+                    SendMessageRequest(
+                        phone=to_jid,
+                        message=visible_message,
+                        reply_message_id=in_reply_to,
+                    )
+                )
+                if not resp.results or not resp.results.message_id:
+                    raise RuntimeError("send response did not contain a message id")
+                break
+            except Exception as error:
+                response = getattr(error, "response", None)
+                status_code = getattr(response, "status_code", None)
+                retryable = status_code is None or status_code >= 500
+                logger.warning(
+                    "WhatsApp send failed chat=%s attempt=%s/%s status=%s error=%s",
+                    to_jid,
+                    attempt,
+                    attempts,
+                    status_code if status_code is not None else "unknown",
+                    type(error).__name__,
+                )
+                if not retryable or attempt >= attempts:
+                    raise
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
         assert resp.results, "Failed to send message"
         sent_message_id = resp.results.message_id
         assert sent_message_id, "Failed to get sent message ID"

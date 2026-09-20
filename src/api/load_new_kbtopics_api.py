@@ -1,4 +1,5 @@
 import logging
+from fastapi import Request
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 @router.post("/load_new_kbtopics", dependencies=[Depends(require_ai_enabled)])
 async def load_new_kbtopics_api(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_db_async_session)],
     whatsapp: Annotated[WhatsAppClient, Depends(get_whatsapp)],
     embedding_client: Annotated[AsyncClient, Depends(get_text_embebedding)],
@@ -35,9 +37,16 @@ async def load_new_kbtopics_api(
         logger.info("Starting load new kbtopics sync via API")
 
         topics_loader = topicsLoader()
-        await topics_loader.load_topics_for_all_groups(
-            session, embedding_client, whatsapp
-        )
+        semaphore = getattr(request.app.state, "background_semaphore", None)
+        if semaphore is None:
+            await topics_loader.load_topics_for_all_groups(
+                session, embedding_client, whatsapp
+            )
+        else:
+            async with semaphore:
+                await topics_loader.load_topics_for_all_groups(
+                    session, embedding_client, whatsapp
+                )
 
         logger.info("load new kbtopics sync completed successfully")
 
@@ -46,7 +55,10 @@ async def load_new_kbtopics_api(
             "message": "load new kbtopics sync completed successfully",
         }
 
-    except Exception as e:
-        logger.error(f"Error during load new kbtopics sync: {e!s}")
+    except Exception as error:
+        logger.error(
+            "Error during load new kbtopics sync error=%s",
+            type(error).__name__,
+        )
         # Re-raise the exception to let FastAPI handle it with proper error response
         raise

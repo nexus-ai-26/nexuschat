@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -55,3 +57,33 @@ async def test_base_handler_can_forward_a_file_via_gowa():
     assert request.is_forwarded is True
     assert content == b"pdf-bytes"
     assert whatsapp.send_file.await_args.kwargs["filename"] == "guide.pdf"
+
+
+@pytest.mark.asyncio
+async def test_base_handler_retries_server_send_failures():
+    whatsapp = AsyncMock()
+    response = AsyncMock()
+    response.results.message_id = "sent-2"
+    error = RuntimeError("bridge unavailable")
+    cast(Any, error).response = SimpleNamespace(status_code=500)
+    whatsapp.send_message.side_effect = [error, response]
+    whatsapp.get_my_jid.return_value = JID(user="bot", server="s.whatsapp.net")
+    handler = BaseHandler(AsyncSessionMock(), whatsapp, AsyncMock())
+    handler.store_message = AsyncMock(
+        return_value=Message(
+            message_id="sent-2",
+            chat_jid="user@s.whatsapp.net",
+            sender_jid="bot@s.whatsapp.net",
+            text="clean",
+        )
+    )
+    setattr(handler, "settings", SimpleNamespace(send_retry_attempts=2, send_retry_base_seconds=0))
+
+    await handler.send_message(
+        "user@s.whatsapp.net",
+        "answer",
+        in_reply_to="question-1",
+    )
+
+    assert whatsapp.send_message.await_count == 2
+    assert whatsapp.send_message.await_args.args[0].reply_message_id == "question-1"

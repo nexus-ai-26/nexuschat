@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,7 +28,8 @@ NVIDIA_MODEL = "openai/gpt-oss-20b"
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 OPENAI_MODEL = "gpt-4o-mini"
 PROVIDER_TIMEOUT_SECONDS = 30.0
-CIRCUIT_BREAKER_SECONDS = 10 * 60
+CIRCUIT_BREAKER_SECONDS = 60 * 60
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 DEFAULT_PROVIDER_ORDER = "openai,deepseek,gemini,kimi,openrouter,nvidia,groq"
 _provider_circuit_open_until: dict[str, float] = {}
 
@@ -85,10 +87,60 @@ def _provider_is_circuit_open(provider: str) -> bool:
     return _provider_circuit_open_until.get(provider, 0.0) > time.monotonic()
 
 
-def _open_provider_circuit(provider: str, status_code: int | None) -> None:
-    if status_code in {401, 402, 404}:
-        _provider_circuit_open_until[provider] = (
-            time.monotonic() + CIRCUIT_BREAKER_SECONDS
+def _retry_after_seconds(error: Exception) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    value = headers.get("Retry-After") if headers is not None else None
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_at = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S GMT")
+        except (TypeError, ValueError):
+            return None
+        return max(
+            0.0,
+            (retry_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds(),
+        )
+
+
+def _open_provider_circuit(
+    provider: str,
+    status_code: int | None,
+    error: Exception,
+    settings: Settings,
+) -> None:
+    now = time.monotonic()
+    if status_code in {401, 403, 404, 410}:
+        cooldown = float(
+            getattr(settings, "provider_permanent_cooldown_seconds", CIRCUIT_BREAKER_SECONDS)
+        )
+        already_open = _provider_circuit_open_until.get(provider, 0.0) > now
+        _provider_circuit_open_until[provider] = now + cooldown
+        if not already_open:
+            logger.error(
+                "Provider circuit opened provider=%s status=%s cooldown_seconds=%s",
+                provider,
+                status_code,
+                int(cooldown),
+            )
+    elif status_code == 429:
+        cooldown = _retry_after_seconds(error)
+        if cooldown is None:
+            cooldown = float(
+                getattr(
+                    settings,
+                    "provider_rate_limit_cooldown_seconds",
+                    RATE_LIMIT_COOLDOWN_SECONDS,
+                )
+            )
+        _provider_circuit_open_until[provider] = now + cooldown
+        logger.warning(
+            "Provider rate limited provider=%s cooldown_seconds=%s",
+            provider,
+            int(cooldown),
         )
 
 
@@ -102,6 +154,7 @@ def _openai_model(
         api_key=api_key,
         base_url=base_url,
         timeout=PROVIDER_TIMEOUT_SECONDS,
+        max_retries=0,
     )
     return OpenAIChatModel(
         model_name,
@@ -283,7 +336,9 @@ async def run_with_provider_fallback(
                 agent_kwargs["output_type"] = output_type
             result = await asyncio.wait_for(
                 Agent(**agent_kwargs).run(prompt),
-                timeout=PROVIDER_TIMEOUT_SECONDS,
+                timeout=float(
+                    getattr(settings, "provider_timeout_seconds", PROVIDER_TIMEOUT_SECONDS)
+                ),
             )
         except Exception as error:
             if not _is_retryable_provider_error(error):
@@ -291,7 +346,7 @@ async def run_with_provider_fallback(
 
             failures.append((candidate.provider, error))
             status_code = _status_code(error)
-            _open_provider_circuit(candidate.provider, status_code)
+            _open_provider_circuit(candidate.provider, status_code, error, settings)
             logger.warning(
                 "provider=%s failed status=%s, falling back",
                 candidate.provider,

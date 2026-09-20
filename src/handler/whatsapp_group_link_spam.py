@@ -2,7 +2,6 @@
 
 import logging
 from .base_handler import BaseHandler
-from pydantic_ai import Agent
 from pydantic import BaseModel
 from sqlmodel import Field, select, desc
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -13,6 +12,7 @@ from models import Message
 from whatsapp import WhatsAppClient
 from whatsapp.jid import parse_jid
 from services.prompt_manager import prompt_manager
+from utils.llm_provider import run_with_provider_fallback
 
 # Creating an object
 logger = logging.getLogger(__name__)
@@ -36,13 +36,6 @@ class WhatsappGroupLinkSpamHandler(BaseHandler):
         explanation: str = Field(max_length=100, description="Short explanation")
 
     async def __call__(self, message: Message):
-        agent = Agent(
-            model=self.settings.model_name,
-            system_prompt=prompt_manager.render("link_spam_detector.j2"),
-            output_type=self.SpamCheckResult,
-            output_retries=3,
-        )
-
         last_messages_text = ""
         if message.group_jid:
             stmt = (
@@ -63,14 +56,18 @@ class WhatsappGroupLinkSpamHandler(BaseHandler):
                     if msg.text
                 ]
             )
+            await self.session.commit()
 
-        result = await agent.run(
-            (
+        result = await run_with_provider_fallback(
+            self.settings,
+            system_prompt=prompt_manager.render("link_spam_detector.j2"),
+            prompt=(
                 f"@{parse_jid(message.sender_jid).user}:"
                 f"{message.text}"
                 f"The message is from a group chat. The group name is {message.group.group_name if message.group else 'Unknown'} and the group description is {message.group.group_topic if message.group else 'Unknown'}"
                 f"These are the last 10 messages in the group for context:\n{last_messages_text}"
-            )
+            ),
+            output_type=self.SpamCheckResult,
         )
         spam_result = result.output
 
@@ -88,5 +85,5 @@ class WhatsappGroupLinkSpamHandler(BaseHandler):
         await self.send_message(
             message.chat_jid,
             message_to_send,
-            # message.message_id,
+            in_reply_to=message.message_id,
         )

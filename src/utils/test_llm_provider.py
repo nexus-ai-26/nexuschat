@@ -1,3 +1,5 @@
+import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -8,6 +10,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 from utils.llm_provider import (
     ProviderConfigurationError,
     ProviderFallbackError,
+    _openai_direct_model,
     _provider_circuit_open_until,
     _model_chain,
     run_with_provider_fallback,
@@ -127,6 +130,85 @@ async def test_auth_error_falls_through():
         )
 
     assert result.output == "fallback response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [403, 410])
+async def test_permanent_provider_errors_open_one_hour_circuit(
+    status_code: int, caplog: pytest.LogCaptureFixture
+):
+    first = AsyncMock(side_effect=ModelHTTPError(status_code, "deepseek-chat"))
+    second = AsyncMock(return_value=AgentRunResult(output="fallback response"))
+
+    with patch(
+        "utils.llm_provider.Agent",
+        side_effect=[_Agent(first), _Agent(second)],
+    ):
+        result = await run_with_provider_fallback(
+            settings(llm_provider_order="deepseek,kimi"),
+            system_prompt="system",
+            prompt="question",
+        )
+
+    assert result.output == "fallback response"
+    assert _provider_circuit_open_until["deepseek"] > 0
+    assert sum("Provider circuit opened provider=deepseek" in r.message for r in caplog.records) == 1
+
+
+class _RetryAfterError(Exception):
+    status_code = 429
+    response = SimpleNamespace(headers={"Retry-After": "120"})
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_uses_retry_after_for_cooldown():
+    first = AsyncMock(side_effect=_RetryAfterError())
+    second = AsyncMock(return_value=AgentRunResult(output="fallback response"))
+
+    with patch(
+        "utils.llm_provider.Agent",
+        side_effect=[_Agent(first), _Agent(second)],
+    ):
+        result = await run_with_provider_fallback(
+            settings(llm_provider_order="deepseek,kimi"),
+            system_prompt="system",
+            prompt="question",
+        )
+
+    assert result.output == "fallback response"
+    assert 100 <= _provider_circuit_open_until["deepseek"] - time.monotonic() <= 121
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_is_a_fallback_failure():
+    async def never_finishes(_prompt: str):
+        await asyncio.sleep(1)
+
+    first = AsyncMock(side_effect=never_finishes)
+    second = AsyncMock(return_value=AgentRunResult(output="fallback response"))
+
+    with patch(
+        "utils.llm_provider.Agent",
+        side_effect=[_Agent(first), _Agent(second)],
+    ):
+        result = await run_with_provider_fallback(
+            settings(
+                llm_provider_order="deepseek,kimi",
+                provider_timeout_seconds=0.01,
+            ),
+            system_prompt="system",
+            prompt="question",
+        )
+
+    assert result.output == "fallback response"
+    first.assert_awaited_once_with("question")
+
+
+def test_openai_sdk_retries_are_disabled():
+    with patch("utils.llm_provider.AsyncOpenAI") as client:
+        _openai_direct_model(settings(openai_api_key="openai-test-key"))
+
+    assert client.call_args.kwargs["max_retries"] == 0
 
 
 @pytest.mark.asyncio
