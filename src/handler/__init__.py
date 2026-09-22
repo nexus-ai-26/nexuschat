@@ -1,7 +1,9 @@
-﻿import asyncio
+import asyncio
 import inspect
 import logging
 import re
+from collections.abc import Awaitable
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from cachetools import TTLCache
@@ -106,7 +108,7 @@ class MessageHandler(BaseHandler):
 
         # direct message
         if message and not message.group:
-            pass
+            await self._send_private_opening_once(message)
             command = message.text.strip().lower()
             if command == "opt-out":
                 await self.handle_opt_out(message)
@@ -165,8 +167,10 @@ class MessageHandler(BaseHandler):
             await self.router(message)
             return
 
-        if message.group and message.group.notify_on_spam and self._contains_whatsapp_group_link(
-            message.text
+        if (
+            message.group
+            and message.group.notify_on_spam
+            and self._contains_whatsapp_group_link(message.text)
         ):
             self._log_silent(message, "group link is not a programme question")
             return
@@ -197,9 +201,9 @@ class MessageHandler(BaseHandler):
             return
         # Claim before the bridge call so a duplicate webhook cannot send a second
         # opening while the first call is in flight.
-        result = self.session.add(DMGreeting(sender_jid=message.sender_jid))
+        result = cast(Any, self.session.add(DMGreeting(sender_jid=message.sender_jid)))
         if inspect.isawaitable(result):
-            await result
+            await cast(Awaitable[Any], result)
         await self.session.commit()
         await self.send_message(message.chat_jid, DM_OPENING)
 
@@ -282,25 +286,41 @@ class MessageHandler(BaseHandler):
         if not opt_out:
             opt_out = OptOut(jid=message.sender_jid)
             await self.upsert(opt_out)
+            await self.send_message(
+                message.chat_jid,
+                "You have been opted out. You will no longer be tagged in summaries and answers.",
+            )
             logger.info("DM command handled chat=%s command=opt-out", message.chat_jid)
         else:
-            logger.info("DM command handled chat=%s command=opt-out already_set", message.chat_jid)
+            await self.send_message(message.chat_jid, "You are already opted out.")
+            logger.info(
+                "DM command handled chat=%s command=opt-out already_set",
+                message.chat_jid,
+            )
 
     async def handle_opt_in(self, message: Message):
         opt_out = await self.session.get(OptOut, message.sender_jid)
         if opt_out:
             await self.session.delete(opt_out)
             await self.session.commit()
+            await self.send_message(
+                message.chat_jid,
+                "You have been opted in. You will now be tagged in summaries and answers.",
+            )
             logger.info("DM command handled chat=%s command=opt-in", message.chat_jid)
         else:
-            logger.info("DM command handled chat=%s command=opt-in already_set", message.chat_jid)
+            await self.send_message(message.chat_jid, "You are already opted in.")
+            logger.info(
+                "DM command handled chat=%s command=opt-in already_set",
+                message.chat_jid,
+            )
 
     async def handle_opt_status(self, message: Message):
         opt_out = await self.session.get(OptOut, message.sender_jid)
         status = "opted out" if opt_out else "opted in"
+        await self.send_message(message.chat_jid, f"You are currently {status}.")
         logger.info(
             "DM command handled chat=%s command=status status=%s",
             message.chat_jid,
             status,
         )
-

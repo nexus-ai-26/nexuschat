@@ -10,6 +10,7 @@ from handler.knowledge_base_answers import KnowledgeBaseAnswers
 from models import Group, KBTopic, Message
 from search.hybrid_search import SearchResult
 from test_utils.mock_session import AsyncSessionMock
+from utils.chat_text import chat2text
 from whatsapp.jid import JID
 
 
@@ -188,6 +189,86 @@ def test_auto_reply_context_filters_question_bot_and_test_topic_messages():
     assert [message.message_id for message in filtered] == ["useful"]
 
 
+def test_recent_context_is_chronological_and_repeated_copies_are_deduplicated():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+    older = _message(
+        message_id="older",
+        text="Correction: the submission deadline is Friday.",
+        timestamp=datetime(2026, 9, 20, tzinfo=timezone.utc),
+    )
+    newer_copy = _message(
+        message_id="newer-copy",
+        text="Correction: the submission deadline is Friday.",
+        timestamp=datetime(2026, 9, 21, tzinfo=timezone.utc),
+    )
+    latest = _message(
+        message_id="latest",
+        text="The organizer proposed a Saturday extension, not yet confirmed.",
+        timestamp=datetime(2026, 9, 22, tzinfo=timezone.utc),
+    )
+
+    filtered = handler._filter_auto_reply_messages(
+        [latest, older, newer_copy],
+        current_question="What is the deadline?",
+        current_sender="questioner@s.whatsapp.net",
+        group_jid="group@g.us",
+        bot_jid="bot@s.whatsapp.net",
+    )
+
+    assert [message.message_id for message in filtered] == ["newer-copy", "latest"]
+    assert "proposed" in (filtered[-1].text or "")
+
+
+def test_recent_context_limit_is_bounded_for_non_settings_test_doubles():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(),
+        AsyncMock(),
+        AsyncMock(),
+        SimpleNamespace(recent_message_context_limit=500),
+    )
+
+    assert handler._recent_message_context_limit() == 100
+
+
+def test_recent_context_preserves_speculation_and_correction_qualifiers():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+    ordinary_speculation = _message(
+        message_id="speculation",
+        sender_jid="member@s.whatsapp.net",
+        text="I think the deadline may be Friday, but nobody has verified this information yet.",
+    )
+    organizer_correction = _message(
+        message_id="correction",
+        sender_jid="250783188655@s.whatsapp.net",
+        text="Correction: the organizer said submissions are extended to Friday.",
+    )
+
+    filtered = handler._filter_auto_reply_messages(
+        [ordinary_speculation, organizer_correction],
+        current_question="What is the deadline?",
+        current_sender="questioner@s.whatsapp.net",
+        group_jid="group@g.us",
+        bot_jid="bot@s.whatsapp.net",
+    )
+
+    assert [message.message_id for message in filtered] == [
+        "speculation",
+        "correction",
+    ]
+    context = chat2text(
+        filtered,
+        {},
+        {"250783188655@s.whatsapp.net": "Diana"},
+    )
+    assert "I think" in context
+    assert "nobody has verified" in context
+    assert "Diana: Correction" in context
+
+
 def test_auto_reply_does_not_send_sources_or_phone_numbers():
     cleaned = KnowledgeBaseAnswers._clean_auto_reply_text(
         "Answer [1]. Call +251 911 222 333.\nSources:\n[1] raw member message"
@@ -196,6 +277,120 @@ def test_auto_reply_does_not_send_sources_or_phone_numbers():
     assert "Sources" not in cleaned
     assert "[1]" not in cleaned
     assert "+251" not in cleaned
+
+
+def test_file_request_matching_supports_common_document_words():
+    for request in (
+        "Please send the PDF",
+        "Can you share the transcript?",
+        "Please send the slides",
+        "Share the presentation",
+        "Could you resend the recording?",
+    ):
+        assert KnowledgeBaseAnswers._is_file_request(request)
+
+
+def test_file_request_matching_does_not_claim_unsupported_implicit_files():
+    assert not KnowledgeBaseAnswers._is_file_request("Can you send it?")
+
+
+@pytest.mark.asyncio
+async def test_live_group_member_count_is_answered_from_the_sdk_result():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+    handler.whatsapp.get_my_jid = AsyncMock(
+        return_value=JID(user="bot", server="s.whatsapp.net")
+    )
+    handler.whatsapp.get_group_member_count = AsyncMock(return_value=42)
+    handler.send_message = AsyncMock()
+
+    answered = await handler(_message(text="How many members are in the group?"))
+
+    assert answered is True
+    handler.whatsapp.get_group_member_count.assert_awaited_once_with("group@g.us")
+    handler.send_message.assert_awaited_once_with(
+        "group@g.us",
+        "This group currently has 42 members.",
+        in_reply_to="question-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_group_member_count_unavailable_does_not_generate_a_number():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+    handler.whatsapp.get_my_jid = AsyncMock(
+        return_value=JID(user="bot", server="s.whatsapp.net")
+    )
+    handler.whatsapp.get_group_member_count = AsyncMock(return_value=None)
+    handler.send_message = AsyncMock()
+    handler.generation_agent = AsyncMock()
+
+    answered = await handler(_message(text="What is the current group size?"))
+
+    assert answered is False
+    handler.send_message.assert_not_awaited()
+    handler.generation_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generation_prompt_separates_trusted_facts_and_recent_chat():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+    handler.settings.model_name = "test"
+    with patch(
+        "handler.knowledge_base_answers.run_with_provider_fallback",
+        new=AsyncMock(return_value=AgentRunResult(output="ok")),
+    ) as run:
+        await handler.generation_agent(
+            "Who handles the MIT course?",
+            "official course context",
+            "user@s.whatsapp.net",
+            [_message(text="Correction: the link changed.")],
+            {},
+            trusted_application_facts="Munira handles course support.",
+            live_tool_results="No live tool results are available.",
+        )
+
+    prompt = run.await_args.kwargs["prompt"]
+    assert "# TRUSTED_APPLICATION_FACTS" in prompt
+    assert "# LIVE_TOOL_RESULTS" in prompt
+    assert "# RECENT_CHAT_CONTEXT" in prompt
+    assert "# CURATED_KB_CONTEXT" in prompt
+    assert prompt.index("# TRUSTED_APPLICATION_FACTS") < prompt.index(
+        "# RECENT_CHAT_CONTEXT"
+    )
+
+
+@pytest.mark.asyncio
+async def test_generation_prompt_deduplicates_recent_organizer_context():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+    handler.settings.model_name = "test"
+    correction = _message(
+        message_id="correction",
+        sender_jid="250783188655@s.whatsapp.net",
+        text="Correction: the deadline is Friday.",
+    )
+    with patch(
+        "handler.knowledge_base_answers.run_with_provider_fallback",
+        new=AsyncMock(return_value=AgentRunResult(output="ok")),
+    ) as run:
+        await handler.generation_agent(
+            "What is the deadline?",
+            "official context",
+            "user@s.whatsapp.net",
+            [correction],
+            {},
+            organizer_history=[correction],
+        )
+
+    prompt = run.await_args.kwargs["prompt"]
+    assert prompt.count("Correction: the deadline is Friday.") == 1
 
 
 @pytest.mark.asyncio

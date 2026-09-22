@@ -113,3 +113,40 @@ async def test_send_message(client: WhatsAppClient, httpx_mock: HTTPXMock):
     assert response.code == "200"
     assert response.results is not None
     assert response.results.message_id == "msg_123"
+
+
+@pytest.mark.asyncio
+async def test_get_group_member_count_uses_live_participants(
+    client: WhatsAppClient, httpx_mock: HTTPXMock
+):
+    httpx_mock.add_response(
+        url="http://test-api/group/participants?group_id=group%40g.us",
+        json={
+            "code": "200",
+            "results": {
+                "data": [
+                    {
+                        "JID": "group@g.us",
+                        "Participants": [
+                            {"JID": "one@s.whatsapp.net"},
+                            {"JID": "two@s.whatsapp.net"},
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+
+    assert await client.get_group_member_count("group@g.us") == 2
+
+
+@pytest.mark.asyncio
+async def test_get_group_member_count_returns_none_without_participant_data(
+    client: WhatsAppClient, httpx_mock: HTTPXMock
+):
+    httpx_mock.add_response(
+        url="http://test-api/group/participants?group_id=group%40g.us",
+        json={"code": "200", "results": {"data": [{"JID": "group@g.us"}]}},
+    )
+
+    assert await client.get_group_member_count("group@g.us") is None

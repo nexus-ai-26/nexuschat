@@ -3,7 +3,7 @@ from functools import lru_cache
 from os import environ
 from typing import Annotated, Final, Self
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from whatsapp.jid import (
@@ -14,11 +14,14 @@ from whatsapp.jid import (
     parse_jid,
 )
 
+from .trusted_facts import TRUSTED_APPLICATION_FACTS as TRUSTED_APPLICATION_FACTS
+
 # Provider prefixes this app manages credentials for.
 # prefix -> (Settings attribute, environment variable pydantic-ai reads)
 _MANAGED_PROVIDERS: Final[dict[str, tuple[str, str]]] = {
     "anthropic": ("anthropic_api_key", "ANTHROPIC_API_KEY"),
     "openai": ("openai_api_key", "OPENAI_API_KEY"),
+    "openai-responses": ("openai_api_key", "OPENAI_API_KEY"),
     "openrouter": ("openrouter_api_key", "OPENROUTER_API_KEY"),
     "deepseek": ("deepseek_api_key", "DEEPSEEK_API_KEY"),
     "kimi": ("kimi_api_key", "KIMI_API_KEY"),
@@ -56,7 +59,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-flash"
     kimi_api_key: str | None = None
     kimi_base_url: str = "https://api.moonshot.ai/v1"
     kimi_model: str = "kimi-k2-turbo-preview"
@@ -121,6 +124,8 @@ class Settings(BaseSettings):
     catchup_start_delay_seconds: float = 30.0
     catchup_admin_secret: str | None = None
     other_bot_jids: Annotated[list[str], NoDecode] = []
+    recent_message_context_limit: int = Field(default=30, ge=1, le=100)
+    max_reply_chars: int = Field(default=5000, ge=5000)
 
     @field_validator("qa_testers")
     @classmethod

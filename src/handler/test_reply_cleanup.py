@@ -77,7 +77,11 @@ async def test_base_handler_retries_server_send_failures():
             text="clean",
         )
     )
-    setattr(handler, "settings", SimpleNamespace(send_retry_attempts=2, send_retry_base_seconds=0))
+    setattr(
+        handler,
+        "settings",
+        SimpleNamespace(send_retry_attempts=2, send_retry_base_seconds=0),
+    )
 
     await handler.send_message(
         "user@s.whatsapp.net",
@@ -87,3 +91,40 @@ async def test_base_handler_retries_server_send_failures():
 
     assert whatsapp.send_message.await_count == 2
     assert whatsapp.send_message.await_args.args[0].reply_message_id == "question-1"
+
+
+@pytest.mark.asyncio
+async def test_base_handler_chunks_long_replies_at_whatsapp_transport_limit():
+    whatsapp = AsyncMock()
+    response = AsyncMock()
+    response.results.message_id = "sent-long"
+    whatsapp.send_message.return_value = response
+    whatsapp.get_my_jid.return_value = JID(user="bot", server="s.whatsapp.net")
+    handler = BaseHandler(AsyncSessionMock(), whatsapp, AsyncMock())
+    handler.settings = type("ReplySettings", (), {"max_reply_chars": 5000})()
+    handler.store_message = AsyncMock(
+        return_value=Message(
+            message_id="sent-long",
+            chat_jid="user@s.whatsapp.net",
+            sender_jid="bot@s.whatsapp.net",
+            text="clean",
+        )
+    )
+    logical_reply = (
+        ("Paragraph one with supported detail. " * 99)
+        + ("Paragraph one with supported detail.")
+        + "\n\n"
+        + ("Paragraph two with supported detail. " * 24)
+        + ("Paragraph two with supported detail.")
+    )
+
+    await handler.send_message(
+        "user@s.whatsapp.net", logical_reply, in_reply_to="question-2"
+    )
+
+    requests = [call.args[0] for call in whatsapp.send_message.await_args_list]
+    assert len(requests) > 1
+    assert all(len(request.message) <= 4000 for request in requests)
+    assert "".join(request.message for request in requests) == logical_reply
+    assert requests[0].reply_message_id == "question-2"
+    assert all(request.reply_message_id is None for request in requests[1:])

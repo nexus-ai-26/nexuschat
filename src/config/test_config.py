@@ -28,6 +28,7 @@ _ENV_VARS = (
     "KB_EXCLUDE_SUBJECT_PREFIXES",
     "GEMINI_MODEL",
     "LOGFIRE_SEND_TO_LOGFIRE",
+    "MAX_REPLY_CHARS",
 )
 
 _OPENROUTER_MODEL = "openrouter:anthropic/claude-sonnet-4.6"
@@ -62,7 +63,9 @@ def test_anthropic_model_with_key_exports_env_var():
 
 
 def test_openrouter_model_needs_no_anthropic_key():
-    settings = build(model_name=_OPENROUTER_MODEL, openrouter_api_key="openrouter-test-key")
+    settings = build(
+        model_name=_OPENROUTER_MODEL, openrouter_api_key="openrouter-test-key"
+    )
 
     assert settings.anthropic_api_key is None
     assert environ["OPENROUTER_API_KEY"] == "openrouter-test-key"
@@ -82,6 +85,20 @@ def test_anthropic_model_without_key_is_rejected():
 def test_openai_model_requires_its_managed_key():
     with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
         build(model_name="openai:gpt-5")
+
+
+def test_openai_responses_model_requires_its_managed_key():
+    with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
+        build(model_name="openai-responses:gpt-5.6-luna")
+
+
+def test_openai_responses_exact_model_name_is_accepted_with_key():
+    settings = build(
+        model_name="openai-responses:gpt-5.6-luna",
+        openai_api_key="openai-test-key",
+    )
+
+    assert settings.model_name == "openai-responses:gpt-5.6-luna"
 
 
 def test_unmanaged_provider_passes_through_without_a_key():
@@ -163,3 +180,32 @@ def test_gemini_model_default_and_environment_override(monkeypatch: pytest.Monke
     monkeypatch.setenv("GEMINI_MODEL", "gemini-test-model")
     configured = Settings(**{**_BASE, "model_name": "test", "_env_file": None})
     assert configured.gemini_model == "gemini-test-model"
+
+
+def test_recent_message_context_limit_defaults_to_thirty_and_accepts_one_hundred():
+    default = build(model_name="test")
+    maximum = build(model_name="test", recent_message_context_limit=100)
+
+    assert default.recent_message_context_limit == 30
+    assert maximum.recent_message_context_limit == 100
+
+
+def test_recent_message_context_limit_rejects_values_above_one_hundred():
+    with pytest.raises(ValidationError, match="recent_message_context_limit"):
+        build(model_name="test", recent_message_context_limit=101)
+
+
+def test_max_reply_chars_defaults_to_five_thousand_and_is_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    default = build(model_name="test")
+    assert default.max_reply_chars == 5000
+
+    monkeypatch.setenv("MAX_REPLY_CHARS", "6000")
+    configured = build(model_name="test")
+    assert configured.max_reply_chars == 6000
+
+
+def test_max_reply_chars_rejects_a_small_total_budget():
+    with pytest.raises(ValidationError, match="max_reply_chars"):
+        build(model_name="test", max_reply_chars=4999)

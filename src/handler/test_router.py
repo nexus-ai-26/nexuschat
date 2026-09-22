@@ -37,7 +37,7 @@ def mock_embedding_client():
 def test_message():
     return Message(
         message_id="test_id",
-        text="Hello there!",
+        text="Could you assist",
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
         timestamp=datetime.now(timezone.utc),
@@ -207,6 +207,7 @@ async def test_router_other_route(
     mock_settings: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    test_message.text = "Tell me about weather"
     # Mock the Agent class
     mock_agent = MockAgent(Intent(intent=IntentEnum.other))
     monkeypatch.setattr(Agent, "__init__", lambda *args, **kwargs: None)
@@ -259,6 +260,7 @@ async def test_router_summarize_with_opt_out(
     mock_settings: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    test_message.text = "Could you assist"
     # Mock the Agent class for routing
     mock_route_agent = MockAgent(Intent(intent=IntentEnum.summarize))
 
@@ -304,29 +306,15 @@ async def test_router_summarize_with_opt_out(
         # Test the route
         await router(test_message)
 
-        # Verify get_opt_out_map was called
-        mock_get_opt_out_map.assert_called_once()
+        # Summaries are intentionally silent unless a grounded content request
+        # reaches the knowledge-base path.
+        mock_get_opt_out_map.assert_not_called()
 
-    # Verify the summary was sent
-    mock_whatsapp.send_message.assert_called_once_with(
-        SendMessageRequest(
-            phone="user@s.whatsapp.net",
-            message="Summary of messages",
-            reply_message_id="test_id",
-        )
-    )
-
-    # Verify the prompt contained the opted-out name (indirectly via agent call)
-    # We can't easily check the exact prompt string passed to agent.run because of how we mocked it,
-    # but we can verify that the code path was executed without errors.
-    # To be more precise, we could inspect the call args of mock_summarize_agent.run if we had access to it directly,
-    # but here we are using a closure.
-    # However, since we mocked get_opt_out_map and asserted it was called, and the code uses the result,
-    # it gives us confidence.
+    mock_whatsapp.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_router_answers_clear_banter_without_llm(
+async def test_router_nudges_clear_banter_without_llm(
     mock_session: AsyncSessionMock,
     mock_whatsapp: AsyncMock,
     mock_embedding_client: AsyncMock,
@@ -343,7 +331,11 @@ async def test_router_answers_clear_banter_without_llm(
 
     await router(message)
 
-    router.send_message.assert_not_awaited()
+    router.send_message.assert_awaited_once()
+    assert (
+        "here to help with the UniPods METI programme"
+        in (router.send_message.await_args.args[1])
+    )
 
 
 @pytest.mark.asyncio

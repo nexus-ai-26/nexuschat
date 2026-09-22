@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openai import OpenAIChatModel, OpenAIResponsesModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from config import Settings
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_MODEL = "deepseek-flash"
 KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 KIMI_MODEL = "kimi-k2-turbo-preview"
 GEMINI_MODEL = "gemini-3.6-flash"
@@ -49,6 +49,7 @@ class _ModelCandidate:
     provider: str
     model: Any
     name: str
+    model_settings: dict[str, Any] | None = None
 
 
 def _status_code(error: Exception) -> int | None:
@@ -198,6 +199,32 @@ def _openai_direct_model(settings: Settings) -> OpenAIChatModel:
     )
 
 
+def _openai_responses_model(settings: Settings) -> OpenAIResponsesModel:
+    model_name = settings.model_name.partition(":")[2] or settings.model_name
+    client = AsyncOpenAI(
+        api_key=settings.openai_api_key or "",
+        base_url="https://api.openai.com/v1",
+        timeout=PROVIDER_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
+    return OpenAIResponsesModel(
+        model_name,
+        provider=OpenAIProvider(openai_client=client),
+    )
+
+
+def _openai_primary_model(settings: Settings) -> OpenAIChatModel | OpenAIResponsesModel:
+    if settings.model_name.partition(":")[0].lower() == "openai-responses":
+        return _openai_responses_model(settings)
+    return _openai_direct_model(settings)
+
+
+def _openai_primary_name(settings: Settings) -> str:
+    if settings.model_name.partition(":")[0].lower() == "openai-responses":
+        return settings.model_name
+    return f"openai:{getattr(settings, 'openai_model', None) or os.getenv('OPENAI_MODEL', OPENAI_MODEL)}"
+
+
 def _deepseek_model(settings: Settings) -> OpenAIChatModel:
     return _openai_model(
         getattr(settings, "deepseek_model", DEEPSEEK_MODEL),
@@ -235,6 +262,19 @@ def _provider_order(settings: Settings) -> list[str]:
     return [name.strip().lower() for name in configured.split(",") if name.strip()]
 
 
+def _model_settings(provider: str, settings: Settings) -> dict[str, Any] | None:
+    """Return provider-specific reasoning settings supported by Pydantic AI."""
+
+    model_provider = getattr(settings, "model_name", "").partition(":")[0].lower()
+    if provider == "openai" and model_provider == "openai-responses":
+        return {"openai_reasoning_effort": "medium"}
+    if provider == "deepseek":
+        # DeepSeek's OpenAI-compatible API maps the requested medium thinking
+        # level to its supported high reasoning effort.
+        return {"openai_reasoning_effort": "high"}
+    return None
+
+
 def _model_chain(settings: Settings) -> list[_ModelCandidate]:
     """Build active providers in the order configured by ``LLM_PROVIDER_ORDER``."""
 
@@ -243,8 +283,8 @@ def _model_chain(settings: Settings) -> list[_ModelCandidate]:
     builders = {
         "openai": (
             "openai_api_key",
-            lambda: _openai_direct_model(settings),
-            lambda: f"openai:{getattr(settings, 'openai_model', None) or os.getenv('OPENAI_MODEL', OPENAI_MODEL)}",
+            lambda: _openai_primary_model(settings),
+            lambda: _openai_primary_name(settings),
         ),
         "deepseek": (
             "deepseek_api_key",
@@ -314,6 +354,7 @@ def _model_chain(settings: Settings) -> list[_ModelCandidate]:
                 provider=provider,
                 model=model_builder(),
                 name=name_builder(),
+                model_settings=_model_settings(provider, settings),
             )
         )
 
@@ -353,6 +394,8 @@ async def run_with_provider_fallback(
             }
             if output_type is not None:
                 agent_kwargs["output_type"] = output_type
+            if candidate.model_settings is not None:
+                agent_kwargs["model_settings"] = candidate.model_settings
             result = await asyncio.wait_for(
                 Agent(**agent_kwargs).run(prompt),
                 timeout=float(

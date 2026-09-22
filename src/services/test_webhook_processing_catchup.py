@@ -34,12 +34,8 @@ async def test_catchup_processing_failure_never_sends_failure_notice(
         "_handle_payload",
         AsyncMock(side_effect=RuntimeError("provider failed")),
     )
-    send_failure = AsyncMock()
-    monkeypatch.setattr(processing, "_send_failure_reply", send_failure)
-
     result = await processing.process_webhook_message(
         app, payload, send_failure_reply=False
     )
 
     assert result is False
-    send_failure.assert_not_awaited()

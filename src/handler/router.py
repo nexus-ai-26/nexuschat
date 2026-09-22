@@ -34,9 +34,7 @@ NEXUS_INTRO = (
     "I can point out obvious filler such as Lorem ipsum. I can't reliably tell whether "
     "a message was AI-generated just by reading it, and I won't pretend otherwise."
 )
-BOT_FIXED_REPLY = (
-    "I'm Nexus, the UniPods METI AI programme assistant. Ask me about sessions, deadlines, MIT, Wadhwani or links."
-)
+BOT_FIXED_REPLY = "I'm Nexus, the UniPods METI AI programme assistant. Ask me about sessions, deadlines, MIT, Wadhwani or links."
 _BOT_QUESTION_RE = re.compile(
     r"^\s*(?:@\S+\s+)*(?:who\s+are\s+you|are\s+you\s+(?:a\s+)?bot|"
     r"what\s+can\s+you\s+do)\s*[?!.,]*\s*$",
@@ -117,7 +115,7 @@ class Router(BaseHandler):
             ):
                 await self.send_message(
                     message.chat_jid,
-                    "Hi \U0001F44B I'm the UniPods METI AI programme assistant, Nexus bot. Ask me anything about the programme \u2014 sessions, deadlines, MIT, Wadhwani, links \u2014 and I'll help.",
+                    "Hi \U0001f44b I'm the UniPods METI AI programme assistant, Nexus bot. Ask me anything about the programme \u2014 sessions, deadlines, MIT, Wadhwani, links \u2014 and I'll help.",
                     in_reply_to=message.message_id,
                 )
                 return

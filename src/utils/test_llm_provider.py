@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic_ai.agent import AgentRunResult
 from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.models.openai import OpenAIResponsesModel
 
 from utils.llm_provider import (
     ProviderConfigurationError,
@@ -34,7 +35,7 @@ def settings(**overrides: object) -> SimpleNamespace:
         "llm_provider_order": "deepseek,gemini,kimi,openrouter,nvidia,groq",
         "deepseek_api_key": "deepseek-test-key",
         "deepseek_base_url": "https://api.deepseek.com",
-        "deepseek_model": "deepseek-chat",
+        "deepseek_model": "deepseek-flash",
         "gemini_api_key": "gemini-test-key",
         "gemini_model": "gemini-3.6-flash",
         "kimi_api_key": "kimi-test-key",
@@ -88,6 +89,78 @@ async def test_openai_provider_is_selected_and_uses_direct_model():
 
     assert result.output == "openai response"
     assert agent.call_args.kwargs["model"].model_name == "gpt-4o-mini"
+
+
+def test_openai_responses_uses_exact_configured_model_name():
+    chain = _model_chain(
+        settings(
+            model_name="openai-responses:gpt-5.6-luna",
+            llm_provider_order="openai",
+            openai_api_key="openai-test-key",
+        )
+    )
+
+    assert len(chain) == 1
+    assert chain[0].provider == "openai"
+    assert isinstance(chain[0].model, OpenAIResponsesModel)
+    assert chain[0].model.model_name == "gpt-5.6-luna"
+    assert chain[0].name == "openai-responses:gpt-5.6-luna"
+    assert chain[0].model_settings == {"openai_reasoning_effort": "medium"}
+
+
+def test_owner_provider_order_is_built_in_configured_order():
+    chain = _model_chain(
+        settings(
+            model_name="openai-responses:gpt-5.6-luna",
+            llm_provider_order="openai,deepseek,gemini,kimi,openrouter,nvidia,groq",
+            openai_api_key="openai-test-key",
+            deepseek_model="deepseek-flash",
+        )
+    )
+
+    assert [candidate.provider for candidate in chain] == [
+        "openai",
+        "deepseek",
+        "gemini",
+        "kimi",
+        "openrouter",
+        "nvidia",
+        "groq",
+    ]
+    assert chain[1].model.model_name == "deepseek-flash"
+    assert chain[0].model_settings == {"openai_reasoning_effort": "medium"}
+    assert chain[1].model_settings == {"openai_reasoning_effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_openai_retryable_failure_falls_back_to_deepseek():
+    first = AsyncMock(side_effect=ModelHTTPError(503, "gpt-5.6-luna"))
+    second = AsyncMock(return_value=AgentRunResult(output="deepseek response"))
+
+    with patch(
+        "utils.llm_provider.Agent",
+        side_effect=[_Agent(first), _Agent(second)],
+    ) as agent:
+        result = await run_with_provider_fallback(
+            settings(
+                model_name="openai-responses:gpt-5.6-luna",
+                llm_provider_order="openai,deepseek",
+                openai_api_key="openai-test-key",
+                deepseek_model="deepseek-flash",
+            ),
+            system_prompt="system",
+            prompt="question",
+        )
+
+    assert result.output == "deepseek response"
+    first.assert_awaited_once_with("question")
+    second.assert_awaited_once_with("question")
+    assert agent.call_args_list[0].kwargs["model_settings"] == {
+        "openai_reasoning_effort": "medium"
+    }
+    assert agent.call_args_list[1].kwargs["model_settings"] == {
+        "openai_reasoning_effort": "high"
+    }
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ from models import (
 )
 from whatsapp import WhatsAppClient, SendFileRequest, SendMessageRequest
 from whatsapp.jid import normalize_jid
-from utils.reply_text import clean_visible_reply
+from utils.reply_text import chunk_reply_text, clean_visible_reply
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,7 @@ class BaseHandler:
         *,
         sanitize: bool = True,
         mentions: list[str] | None = None,
+        allowed_phone_numbers: tuple[str, ...] = (),
     ) -> Message:
         """
         Send a message to a JID over WhatsApp, and store the message in the database
@@ -162,8 +163,23 @@ class BaseHandler:
         assert to_jid, "to_jid is required"
         assert message, "message is required"
         to_jid = normalize_jid(to_jid)
-        visible_message = clean_visible_reply(message) if sanitize else message
+        visible_message = (
+            clean_visible_reply(
+                message,
+                allowed_phone_numbers=allowed_phone_numbers,
+            )
+            if sanitize
+            else message
+        )
         assert visible_message, "message is empty after cleanup"
+
+        max_reply_chars = getattr(
+            getattr(self, "settings", None), "max_reply_chars", 5000
+        )
+        if isinstance(max_reply_chars, bool) or not isinstance(max_reply_chars, int):
+            max_reply_chars = 5000
+        max_reply_chars = max(max_reply_chars, 5000)
+        chunks = chunk_reply_text(visible_message, max_total_chars=max_reply_chars)
 
         attempts = max(
             1, int(getattr(getattr(self, "settings", None), "send_retry_attempts", 3))
@@ -171,46 +187,50 @@ class BaseHandler:
         base_delay = float(
             getattr(getattr(self, "settings", None), "send_retry_base_seconds", 0.5)
         )
-        for attempt in range(1, attempts + 1):
-            try:
-                resp = await self.whatsapp.send_message(
-                    SendMessageRequest(
-                        phone=to_jid,
-                        message=visible_message,
-                        reply_message_id=in_reply_to,
-                        mentions=mentions,
+        stored_message: Message | None = None
+        for chunk_index, chunk in enumerate(chunks):
+            for attempt in range(1, attempts + 1):
+                try:
+                    resp = await self.whatsapp.send_message(
+                        SendMessageRequest(
+                            phone=to_jid,
+                            message=chunk,
+                            reply_message_id=in_reply_to if chunk_index == 0 else None,
+                            mentions=mentions,
+                        )
                     )
-                )
-                if not resp.results or not resp.results.message_id:
-                    raise RuntimeError("send response did not contain a message id")
-                break
-            except Exception as error:
-                response = getattr(error, "response", None)
-                status_code = getattr(response, "status_code", None)
-                retryable = status_code is None or status_code >= 500
-                logger.warning(
-                    "WhatsApp send failed chat=%s attempt=%s/%s status=%s error=%s",
-                    to_jid,
-                    attempt,
-                    attempts,
-                    status_code if status_code is not None else "unknown",
-                    type(error).__name__,
-                )
-                if not retryable or attempt >= attempts:
-                    raise
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-        assert resp.results, "Failed to send message"
-        sent_message_id = resp.results.message_id
-        assert sent_message_id, "Failed to get sent message ID"
-        my_number = await self.whatsapp.get_my_jid()
-        new_message = BaseMessage(
-            message_id=sent_message_id,
-            text=visible_message,
-            sender_jid=str(my_number),
-            chat_jid=to_jid,
-            reply_to_id=in_reply_to,
-        )
-        stored_message = await self.store_message(Message(**new_message.model_dump()))
+                    if not resp.results or not resp.results.message_id:
+                        raise RuntimeError("send response did not contain a message id")
+                    break
+                except Exception as error:
+                    response = getattr(error, "response", None)
+                    status_code = getattr(response, "status_code", None)
+                    retryable = status_code is None or status_code >= 500
+                    logger.warning(
+                        "WhatsApp send failed chat=%s attempt=%s/%s status=%s error=%s",
+                        to_jid,
+                        attempt,
+                        attempts,
+                        status_code if status_code is not None else "unknown",
+                        type(error).__name__,
+                    )
+                    if not retryable or attempt >= attempts:
+                        raise
+                    await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            assert resp.results, "Failed to send message"
+            sent_message_id = resp.results.message_id
+            assert sent_message_id, "Failed to get sent message ID"
+            my_number = await self.whatsapp.get_my_jid()
+            new_message = BaseMessage(
+                message_id=sent_message_id,
+                text=chunk,
+                sender_jid=str(my_number),
+                chat_jid=to_jid,
+                reply_to_id=in_reply_to if chunk_index == 0 else None,
+            )
+            stored_message = await self.store_message(
+                Message(**new_message.model_dump())
+            )
         assert stored_message, "Failed to store message"
         return stored_message
 

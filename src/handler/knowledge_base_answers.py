@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from pydantic_ai.agent import AgentRunResult
-from sqlmodel import select, desc
+from sqlmodel import col, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
 
@@ -29,6 +29,12 @@ from .auto_reply import (
 )
 from .base_handler import BaseHandler
 from config import Settings
+from config.trusted_facts import (
+    format_trusted_application_facts,
+    trusted_admin_display_names,
+    trusted_admin_jids,
+    trusted_contacts_for_query,
+)
 from services.prompt_manager import prompt_manager
 from services.document_ingestion import (
     document_topics_for_message,
@@ -43,13 +49,26 @@ from utils.reply_text import clean_visible_reply
 logger = logging.getLogger(__name__)
 
 _FILE_REQUEST_RE = re.compile(
-    r"(?:\b(?:send|share|forward|resend|download)\b.*\b(?:file|document|pdf|guideline\w*|recording\w*)\b)"
-    r"|(?:\b(?:file|document|pdf|guideline\w*|recording\w*)\b.*\b(?:send|share|forward|resend|download)\b)",
+    r"(?:\b(?:send|share|forward|resend|download)\b.*\b(?:file|document|pdf|guideline\w*|"
+    r"recording\w*|transcript\w*|slide\w*|presentation\w*)\b)"
+    r"|(?:\b(?:file|document|pdf|guideline\w*|recording\w*|transcript\w*|"
+    r"slide\w*|presentation\w*)\b.*\b(?:send|share|forward|resend|download)\b)",
     re.IGNORECASE,
 )
 _MAX_FORWARD_BYTES = 25 * 1024 * 1024
 _RECAP_RE = re.compile(
     r"\b(?:recap|summary|summarize|this\s+week|what\s+happened|updates?)\b",
+    re.IGNORECASE,
+)
+_RECENT_UPDATE_RE = re.compile(
+    r"\b(?:correction|corrected|update|updated|announcement|extended|changed|"
+    r"what\s+changed)\b",
+    re.IGNORECASE,
+)
+_GROUP_MEMBER_COUNT_RE = re.compile(
+    r"(?:\b(?:how\s+many|number\s+of|count\s+of)\b.*\b(?:members?|participants?)\b|"
+    r"\b(?:current(?:ly)?\s+)?group\s+size\b|"
+    r"\b(?:current(?:ly)?\s+)?(?:members?|participants?)\b.*\b(?:count|number|size|many)\b)",
     re.IGNORECASE,
 )
 _NON_ANSWER_REPLY_RE = re.compile(
@@ -98,14 +117,15 @@ class KnowledgeBaseAnswers(BaseHandler):
         bot_jid = my_jid.normalize_str()
 
         # Exclude test-like, repeated, and bot-authored context on every reply path.
+        context_limit = self._recent_message_context_limit()
         stmt = (
             select(Message)
             .where(Message.chat_jid == message.chat_jid)
             .order_by(desc(Message.timestamp))
-            .limit(7)
+            .limit(context_limit)
         )
         res = await self.session.exec(stmt)
-        history: list[Message] = list(res.all())
+        history: list[Message] = list(reversed(list(res.all())))
         history = self._filter_auto_reply_messages(
             history,
             current_question=message.text,
@@ -114,6 +134,25 @@ class KnowledgeBaseAnswers(BaseHandler):
             bot_jid=bot_jid,
         )
         organizer_history = await self._recent_organizer_messages(message)
+
+        # Dynamic membership is answered only from live WhatsApp state.  If the
+        # SDK/bridge cannot provide it, stay silent rather than letting the model
+        # manufacture a number.
+        if self._is_group_member_count_request(message.text):
+            member_count = await self._live_group_member_count(message)
+            if member_count is None:
+                logger.info(
+                    "RAG reply skipped chat=%s message=%s reason=live member count unavailable",
+                    message.chat_jid,
+                    message.message_id,
+                )
+                return False
+            await self.send_message(
+                message.chat_jid,
+                f"This group currently has {member_count} members.",
+                in_reply_to=message.message_id,
+            )
+            return True
 
         # Get opt-out map
         all_jids = {m.sender_jid for m in history + organizer_history}
@@ -204,6 +243,7 @@ class KnowledgeBaseAnswers(BaseHandler):
 
         # Format results for the generation agent
         formatted_topics = format_search_results_for_prompt(search_results, opt_out_map)
+        trusted_facts = format_trusted_application_facts(message.text)
         # Also prepare distances for logging
         similar_topics_distances = [
             f"topic_distance: {r.vector_distance}" for r in search_results
@@ -220,6 +260,7 @@ class KnowledgeBaseAnswers(BaseHandler):
                 auto_reply=auto_reply,
                 weak_match=weak_match_context,
                 organizer_history=organizer_history,
+                trusted_application_facts=trusted_facts,
             )
         except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
             self._log_provider_skip(message, error)
@@ -234,7 +275,11 @@ class KnowledgeBaseAnswers(BaseHandler):
             similar_topics_distances,
         )
 
-        response_text = self._clean_auto_reply_text(generation_result.output)
+        allowed_contacts = trusted_contacts_for_query(message.text)
+        response_text = self._clean_auto_reply_text(
+            generation_result.output,
+            allowed_phone_numbers=allowed_contacts,
+        )
         if not response_text or is_no_answer(response_text):
             self._log_auto_reply_skip(message, "model returned NO_ANSWER")
             if not message.chat_jid.endswith("@g.us"):
@@ -252,6 +297,7 @@ class KnowledgeBaseAnswers(BaseHandler):
             message.chat_jid,
             response_text,
             in_reply_to=message.message_id,
+            allowed_phone_numbers=allowed_contacts,
         )
 
         return True
@@ -304,11 +350,19 @@ class KnowledgeBaseAnswers(BaseHandler):
         )
 
     async def _recent_organizer_messages(self, message: Message) -> list[Message]:
-        """Load organizer posts from the current group for recap questions."""
-        if not message.group_jid or not _RECAP_RE.search(message.text or ""):
+        """Load recent organizer statements for recap/update questions.
+
+        These messages remain attributed chat statements.  They are useful for
+        reporting a correction or announcement, but are not promoted to permanent
+        programme facts by this lookup alone.
+        """
+        if not message.group_jid or not (
+            _RECAP_RE.search(message.text or "")
+            or _RECENT_UPDATE_RE.search(message.text or "")
+        ):
             return []
 
-        organizer_jids: set[str] = set()
+        organizer_jids: set[str] = trusted_admin_jids()
         if message.group and message.group.owner_jid:
             organizer_jids.add(message.group.owner_jid)
         for value in (
@@ -329,7 +383,7 @@ class KnowledgeBaseAnswers(BaseHandler):
             select(Message)
             .where(Message.group_jid == message.group_jid)
             .where(Message.timestamp >= cutoff)
-            .order_by(Message.timestamp)
+            .order_by(col(Message.timestamp))
             .limit(100)
         )
         result = await self.session.exec(stmt)
@@ -338,6 +392,7 @@ class KnowledgeBaseAnswers(BaseHandler):
             for candidate in result.all()
             if candidate.sender_jid in organizer_jids and candidate.text
         ]
+        messages = self._deduplicate_messages(messages)
         logger.info(
             "recap organizer context group=%s messages=%s window_hours=48",
             message.group_jid,
@@ -422,7 +477,12 @@ class KnowledgeBaseAnswers(BaseHandler):
             and len(message.text.split()) <= 12
             and auto_reply_question_rule(message.text) is not None
         )
-        return not (is_recent and is_other_group_member and is_short_question)
+        return not (
+            is_recent
+            and is_other_group_member
+            and is_short_question
+            and not _RECENT_UPDATE_RE.search(message.text or "")
+        )
 
     def _filter_auto_reply_messages(
         self,
@@ -434,7 +494,7 @@ class KnowledgeBaseAnswers(BaseHandler):
         bot_jid: str,
     ) -> list[Message]:
         now = datetime.now(timezone.utc)
-        return [
+        filtered = [
             message
             for message in messages
             if self._is_auto_reply_context_message_allowed(
@@ -446,6 +506,50 @@ class KnowledgeBaseAnswers(BaseHandler):
                 now=now,
             )
         ]
+        return self._deduplicate_messages(filtered)
+
+    @staticmethod
+    def _deduplicate_messages(messages: list[Message]) -> list[Message]:
+        """Keep the newest copy of repeated text while preserving chronology."""
+
+        latest_by_text: dict[str, Message] = {}
+        without_text: list[Message] = []
+        for message in messages:
+            key = normalize_question(message.text)
+            if key:
+                latest_by_text[key] = message
+            else:
+                without_text.append(message)
+        return sorted(
+            [*latest_by_text.values(), *without_text],
+            key=KnowledgeBaseAnswers._message_timestamp,
+        )
+
+    def _recent_message_context_limit(self) -> int:
+        value = getattr(self.settings, "recent_message_context_limit", 30)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 30
+        return min(max(value, 1), 100)
+
+    @staticmethod
+    def _is_group_member_count_request(text: str | None) -> bool:
+        return bool(text and _GROUP_MEMBER_COUNT_RE.search(text))
+
+    async def _live_group_member_count(self, message: Message) -> int | None:
+        if not message.group_jid:
+            return None
+        try:
+            member_count = await self.whatsapp.get_group_member_count(message.group_jid)
+        except Exception:
+            logger.warning(
+                "Live group member lookup failed group=%s", message.group_jid
+            )
+            return None
+        return (
+            member_count
+            if isinstance(member_count, int) and member_count >= 0
+            else None
+        )
 
     def _is_excluded_auto_reply_topic(self, topic) -> bool:
         subject = (topic.subject or "").casefold().strip()
@@ -545,9 +649,17 @@ class KnowledgeBaseAnswers(BaseHandler):
         return False
 
     @staticmethod
-    def _clean_auto_reply_text(text: str) -> str:
+    def _clean_auto_reply_text(
+        text: str,
+        *,
+        allowed_phone_numbers: tuple[str, ...] = (),
+    ) -> str:
         """Remove citations, source blocks, identifiers, and excess sentences."""
-        return clean_visible_reply(text, max_sentences=3)
+        return clean_visible_reply(
+            text,
+            max_sentences=3,
+            allowed_phone_numbers=allowed_phone_numbers,
+        )
 
     async def generation_agent(
         self,
@@ -559,21 +671,45 @@ class KnowledgeBaseAnswers(BaseHandler):
         auto_reply: bool = False,
         weak_match: bool = False,
         organizer_history: list[Message] | None = None,
+        trusted_application_facts: str | None = None,
+        live_tool_results: str | None = None,
     ) -> AgentRunResult[str]:
         sender_user = parse_jid(sender).user
         sender_display = opt_out_map.get(sender_user, f"@{sender_user}")
+        trusted_names = trusted_admin_display_names()
+        recent_context = chat2text(history, opt_out_map, trusted_names)
+        history_ids = {item.message_id for item in history}
+        history_text = {
+            normalize_question(item.text)
+            for item in history
+            if normalize_question(item.text)
+        }
+        organizer_only = [
+            item
+            for item in organizer_history or []
+            if item.message_id not in history_ids
+            and normalize_question(item.text) not in history_text
+        ]
+        if organizer_only:
+            recent_context += (
+                "\n\nOrganizer statements selected for this recent update question:\n"
+                + chat2text(organizer_only, opt_out_map, trusted_names)
+            )
 
         prompt_template = f"""
         {sender_display}: {query}
-        
-        # Recent chat history:
-        {chat2text(history, opt_out_map)}
-        
-        # Related Topics:
-        {topics}
 
-        # Organizer messages from the last 48 hours (use only for recap questions):
-        {chat2text(organizer_history or [], opt_out_map)}
+        # TRUSTED_APPLICATION_FACTS
+        {trusted_application_facts or "No relevant trusted application facts are available."}
+
+        # LIVE_TOOL_RESULTS
+        {live_tool_results or "No live tool results are available."}
+
+        # RECENT_CHAT_CONTEXT
+        {recent_context or "No recent chat context is available."}
+
+        # CURATED_KB_CONTEXT
+        {topics}
         """
 
         return await run_with_provider_fallback(
@@ -597,6 +733,6 @@ class KnowledgeBaseAnswers(BaseHandler):
             system_prompt=prompt_manager.render("rephrase.j2", my_jid=my_jid),
             prompt=(
                 f"{message.text}\n\n## Recent chat history:\n "
-                f"{chat2text(history, opt_out_map)}"
+                f"{chat2text(history, opt_out_map, trusted_admin_display_names())}"
             ),
         )
