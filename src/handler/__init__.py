@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from cachetools import TTLCache
 from gowa_sdk.webhooks import WebhookEnvelope
+from sqlalchemy.exc import IntegrityError
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
 
@@ -196,16 +197,33 @@ class MessageHandler(BaseHandler):
             if replied is True:
                 auto_reply_limiter.record(group_jid, message)
 
-    async def _send_private_opening_once(self, message: Message) -> None:
+    async def _send_private_opening_once(self, message: Message) -> bool:
         if await self.session.get(DMGreeting, message.sender_jid) is not None:
-            return
+            return False
         # Claim before the bridge call so a duplicate webhook cannot send a second
         # opening while the first call is in flight.
-        result = cast(Any, self.session.add(DMGreeting(sender_jid=message.sender_jid)))
-        if inspect.isawaitable(result):
-            await cast(Awaitable[Any], result)
+        try:
+            async with self.session.begin_nested():
+                result = cast(
+                    Any, self.session.add(DMGreeting(sender_jid=message.sender_jid))
+                )
+                if inspect.isawaitable(result):
+                    await cast(Awaitable[Any], result)
+                await self.session.flush()
+        except IntegrityError as error:
+            if not self._is_duplicate_greeting_claim(error):
+                raise
+            # Another webhook worker claimed the greeting between our lookup
+            # and insert. The savepoint has been rolled back; do not send twice.
+            return False
         await self.session.commit()
         await self.send_message(message.chat_jid, DM_OPENING)
+        return True
+
+    @staticmethod
+    def _is_duplicate_greeting_claim(error: IntegrityError) -> bool:
+        original = getattr(error, "orig", None)
+        return getattr(original, "constraint_name", None) == "dm_greeting_pkey"
 
     def _configured_auto_reply_groups(self) -> set[str]:
         configured = getattr(self.settings, "auto_reply_groups", [])

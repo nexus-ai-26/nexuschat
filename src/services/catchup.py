@@ -24,6 +24,9 @@ from whatsapp.jid import normalize_jid
 
 logger = logging.getLogger(__name__)
 
+# GoWA rejects ChatMessagesParams values above 100.
+GOWA_CHAT_HISTORY_MAX = 100
+
 
 @dataclass(frozen=True)
 class HistoryMessage:
@@ -234,7 +237,7 @@ class CatchupService:
         end: datetime,
     ) -> list[HistoryMessage]:
         params = ChatMessagesParams(
-            limit=500,
+            limit=GOWA_CHAT_HISTORY_MAX,
             start_time=start,
             end_time=end,
             is_from_me=False,

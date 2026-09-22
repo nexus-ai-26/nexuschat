@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -7,11 +9,13 @@ from models import CatchupAttempt
 from models import Message
 from services.catchup import (
     CatchupService,
+    GOWA_CHAT_HISTORY_MAX,
     find_unanswered_mentions,
     select_catchup_candidates,
     valid_admin_secret,
 )
 from utils.llm_provider import _provider_rate_limited_at, provider_rate_limit_recently
+from whatsapp import WhatsAppClient
 
 
 BOT_JID = "999@s.whatsapp.net"
@@ -167,3 +171,16 @@ async def test_catchup_records_failed_attempt_without_marking_answered():
 
     assert session.rows["failed-message"].status == "failed"
     assert session.rows["failed-message"].last_error == "ProviderFallbackError"
+
+
+@pytest.mark.asyncio
+async def test_bridge_history_uses_gowa_supported_limit():
+    response = SimpleNamespace(results=[])
+    whatsapp = SimpleNamespace(get_chat_messages=AsyncMock(return_value=response))
+    service = CatchupService(SimpleNamespace(state=SimpleNamespace()))
+    start = NOW - timedelta(hours=1)
+
+    await service._bridge_history(cast(WhatsAppClient, whatsapp), GROUP_JID, start, NOW)
+
+    params = whatsapp.get_chat_messages.await_args.kwargs["params"]
+    assert params.limit == GOWA_CHAT_HISTORY_MAX == 100

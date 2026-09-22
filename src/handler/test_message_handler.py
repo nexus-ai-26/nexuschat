@@ -5,6 +5,7 @@ import pytest
 from config import Settings
 from handler.auto_reply import auto_reply_limiter
 from gowa_sdk.webhooks import WebhookEnvelope
+from sqlalchemy.exc import IntegrityError
 from models import DMGreeting, Group, Message
 from handler import DM_OPENING, MessageHandler
 from test_utils.mock_session import AsyncSessionMock
@@ -562,6 +563,64 @@ async def test_private_chat_sends_durable_opening_once_then_routes_question(
     )
     assert handler.send_message.await_count == 1
     assert handler.router.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_greeting_claim_does_not_send_second_opening(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    message = Message(
+        message_id="duplicate-opening-1",
+        chat_jid="duplicate-user@s.whatsapp.net",
+        sender_jid="duplicate-user@s.whatsapp.net",
+        text="hello",
+        timestamp=datetime.now(UTC),
+    )
+    original = type(
+        "DuplicateGreetingError",
+        (Exception,),
+        {"constraint_name": "dm_greeting_pkey"},
+    )("duplicate")
+    mock_session.get.return_value = None
+    mock_session.flush.side_effect = IntegrityError("insert", {}, original)
+    handler.send_message = AsyncMock()
+
+    claimed = await handler._send_private_opening_once(message)
+
+    assert claimed is False
+    handler.send_message.assert_not_awaited()
+    mock_session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_greeting_integrity_error_is_not_swallowed(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    message = Message(
+        message_id="integrity-error-opening-1",
+        chat_jid="integrity-user@s.whatsapp.net",
+        sender_jid="integrity-user@s.whatsapp.net",
+        text="hello",
+        timestamp=datetime.now(UTC),
+    )
+    original = type("OtherConstraintError", (Exception,), {})("duplicate")
+    mock_session.get.return_value = None
+    mock_session.flush.side_effect = IntegrityError("insert", {}, original)
+
+    with pytest.raises(IntegrityError):
+        await handler._send_private_opening_once(message)
 
 
 @pytest.mark.asyncio
