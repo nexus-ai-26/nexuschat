@@ -7,6 +7,12 @@ from pydantic_ai.agent import AgentRunResult
 
 from config import Settings
 from handler.knowledge_base_answers import KnowledgeBaseAnswers
+from handler.conversation_context import (
+    AnswerDepth,
+    ConversationKind,
+    ConversationResolution,
+    RetrievalMode,
+)
 from models import Group, KBTopic, Message
 from search.hybrid_search import SearchResult
 from test_utils.mock_session import AsyncSessionMock
@@ -269,6 +275,29 @@ def test_recent_context_preserves_speculation_and_correction_qualifiers():
     assert "Diana: Correction" in context
 
 
+@pytest.mark.asyncio
+async def test_summary_path_loads_a_broader_chronological_context_window():
+    session = AsyncSessionMock()
+    result = _empty_result()
+    result.all.return_value = [
+        _message(
+            message_id="summary-update",
+            text="Correction: the deadline moved to Thursday.",
+        )
+    ]
+    session.exec = AsyncMock(return_value=result)
+    handler = KnowledgeBaseAnswers(session, AsyncMock(), AsyncMock(), SimpleNamespace())
+
+    messages = await handler._recent_summary_messages(
+        _message(text="Give me the whole programme journey from the last two weeks."),
+        query_text="Give me the whole programme journey from the last two weeks.",
+        bot_jid="bot@s.whatsapp.net",
+    )
+
+    assert [message.message_id for message in messages] == ["summary-update"]
+    assert handler._summary_window_days("last two weeks") == 14
+
+
 def test_auto_reply_does_not_send_sources_or_phone_numbers():
     cleaned = KnowledgeBaseAnswers._clean_auto_reply_text(
         "Answer [1]. Call +251 911 222 333.\nSources:\n[1] raw member message"
@@ -277,6 +306,48 @@ def test_auto_reply_does_not_send_sources_or_phone_numbers():
     assert "Sources" not in cleaned
     assert "[1]" not in cleaned
     assert "+251" not in cleaned
+
+
+def test_generated_answer_is_not_forcibly_reduced_to_three_sentences():
+    cleaned = KnowledgeBaseAnswers._clean_auto_reply_text(
+        "First point. Second point. Third point. Fourth point with useful detail."
+    )
+
+    assert cleaned.count(".") == 4
+    assert "Fourth point" in cleaned
+
+
+@pytest.mark.asyncio
+async def test_rephrasing_prompt_contains_resolved_follow_up_context():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+    handler.settings.model_name = "test"
+    resolution = ConversationResolution(
+        current_message="In details",
+        resolved_query="Expand the previous chatbot improvement question.",
+        kind=ConversationKind.expansion,
+        retrieval_mode=RetrievalMode.conversational_followup,
+        answer_depth=AnswerDepth.detailed,
+        is_follow_up=True,
+        previous_user_message="How can I improve my chatbot?",
+        previous_assistant_message="Start with clear answers.",
+    )
+    with patch(
+        "handler.knowledge_base_answers.run_with_provider_fallback",
+        new=AsyncMock(return_value=AgentRunResult(output="chatbot improvements")),
+    ) as run:
+        await handler.rephrasing_agent(
+            "bot",
+            _message(text="In details"),
+            [],
+            {},
+            resolution=resolution,
+        )
+
+    prompt = run.await_args.kwargs["prompt"]
+    assert "How can I improve my chatbot?" in prompt
+    assert "Expand the previous chatbot improvement question." in prompt
 
 
 def test_file_request_matching_supports_common_document_words():
@@ -360,9 +431,13 @@ async def test_generation_prompt_separates_trusted_facts_and_recent_chat():
     assert "# LIVE_TOOL_RESULTS" in prompt
     assert "# RECENT_CHAT_CONTEXT" in prompt
     assert "# CURATED_KB_CONTEXT" in prompt
-    assert prompt.index("# TRUSTED_APPLICATION_FACTS") < prompt.index(
-        "# RECENT_CHAT_CONTEXT"
+    assert prompt.index("# LIVE_TOOL_RESULTS") < prompt.index(
+        "# TRUSTED_APPLICATION_FACTS"
     )
+    assert prompt.index("# TRUSTED_APPLICATION_FACTS") < prompt.index(
+        "# CURATED_KB_CONTEXT"
+    )
+    assert prompt.index("# CURATED_KB_CONTEXT") < prompt.index("# RECENT_CHAT_CONTEXT")
 
 
 @pytest.mark.asyncio
@@ -534,3 +609,74 @@ async def test_distinct_group_questions_produce_distinct_answers():
         "1. The admins are listed in the programme materials.",
         "2. The programme starts on 1 October.",
     ]
+
+
+@pytest.mark.asyncio
+async def test_realistic_detail_follow_up_reaches_generation_with_previous_subject():
+    session = AsyncSessionMock()
+    first = _message(
+        message_id="chatbot-question",
+        text="How can I improve my chatbot?",
+    )
+    previous_answer = _message(
+        message_id="chatbot-answer",
+        sender_jid="bot@s.whatsapp.net",
+        text="Start with clear answers.",
+    )
+    second = _message(message_id="chatbot-follow-up", text="In details")
+    first_history = _empty_result()
+    first_history.all.return_value = [first]
+    second_history = _empty_result()
+    second_history.all.return_value = [first, previous_answer, second]
+    session.exec = AsyncMock(side_effect=[first_history, second_history])
+    whatsapp = AsyncMock()
+    whatsapp.get_my_jid = AsyncMock(
+        return_value=JID(user="bot", server="s.whatsapp.net")
+    )
+    handler = KnowledgeBaseAnswers(
+        session, whatsapp, AsyncMock(), SimpleNamespace(spec=Settings)
+    )
+    handler.rephrasing_agent = AsyncMock(
+        side_effect=[
+            AgentRunResult(output="chatbot improvement"),
+            AgentRunResult(output="How can I improve my chatbot in detail?"),
+        ]
+    )
+    handler.generation_agent = AsyncMock(
+        side_effect=[
+            AgentRunResult(output="Start with clear answers."),
+            AgentRunResult(
+                output="First point. Second point. Third point. Fourth point."
+            ),
+        ]
+    )
+
+    with (
+        patch(
+            "handler.knowledge_base_answers.get_opt_out_map",
+            new=AsyncMock(return_value={}),
+        ),
+        patch(
+            "handler.knowledge_base_answers.voyage_embed_text",
+            new=AsyncMock(return_value=[[0.1] * 1024]),
+        ),
+        patch(
+            "search.hybrid_search.hybrid_search",
+            new=AsyncMock(return_value=[_result(0.2)]),
+        ) as search,
+    ):
+        handler.send_message = AsyncMock()
+        assert await handler(first) is True
+        assert await handler(second) is True
+
+    second_call = handler.generation_agent.await_args_list[1]
+    assert "How can I improve my chatbot?" in second_call.args[0]
+    assert second_call.kwargs["conversation_resolution"].is_follow_up is True
+    assert second_call.kwargs["conversation_resolution"].answer_depth == (
+        AnswerDepth.detailed
+    )
+    assert (
+        "How can I improve my chatbot in detail?"
+        in search.await_args_list[1].kwargs["query"]
+    )
+    assert handler.send_message.await_args_list[1].args[1].count(".") == 4

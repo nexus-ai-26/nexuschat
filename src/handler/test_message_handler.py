@@ -309,6 +309,30 @@ async def test_managed_group_without_mention_uses_auto_reply(
 
 
 @pytest.mark.asyncio
+async def test_group_contextual_follow_up_reaches_auto_reply_path(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    mock_settings.auto_reply_groups = ["g@g.us"]
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    handler.router = AsyncMock()
+    handler.router.ask_knowledge_base = AsyncMock(return_value=True)
+
+    test_message = _managed_group_message("auto-follow-up-1", "In details")
+    handler.store_message = AsyncMock(return_value=test_message)
+
+    await handler(_group_payload("auto-follow-up-1", test_message.text or ""))
+
+    handler.router.ask_knowledge_base.assert_awaited_once_with(
+        test_message, auto_reply=True
+    )
+
+
+@pytest.mark.asyncio
 async def test_active_unmanaged_group_allows_mention_only_reply(
     mock_session: AsyncSessionMock,
     mock_whatsapp: AsyncMock,

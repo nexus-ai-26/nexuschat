@@ -21,6 +21,7 @@ from .base_handler import BaseHandler
 from services.prompt_manager import prompt_manager
 from utils.llm_provider import ProviderFallbackError, run_with_provider_fallback
 from .auto_reply import is_programme_request, silent_message_reason
+from .conversation_context import is_contextual_follow_up_candidate
 
 
 # Creating an object
@@ -129,7 +130,9 @@ class Router(BaseHandler):
                     in_reply_to=message.message_id,
                 )
                 return
-            if silent_message_reason(message.text):
+            if silent_message_reason(
+                message.text
+            ) and not is_contextual_follow_up_candidate(message.text):
                 _seen = globals().setdefault("_DM_NUDGE_AT", {})
                 _now = _time.monotonic()
                 if _now - _seen.get(message.chat_jid, -1e9) > 300:
@@ -139,6 +142,22 @@ class Router(BaseHandler):
                         "I'm here to help with the UniPods METI programme. Ask me about sessions, deadlines, MIT, Wadhwani, the hackathon or links, and I'll answer right away.",
                         in_reply_to=message.message_id,
                     )
+                return
+        if is_contextual_follow_up_candidate(message.text):
+            try:
+                resolution = await self.ask_knowledge_base.resolve_conversation_context(
+                    message
+                )
+            except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+                logger.warning(
+                    "contextual follow-up resolution skipped chat=%s message=%s error=%s",
+                    message.chat_jid,
+                    message.message_id,
+                    type(error).__name__,
+                )
+                resolution = None
+            if resolution is not None and resolution.is_follow_up:
+                await self.ask_knowledge_base(message)
                 return
         reason = silent_message_reason(message.text)
         if reason:

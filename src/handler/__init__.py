@@ -19,6 +19,7 @@ from handler.auto_reply import (
     auto_reply_text_skip_reason,
 )
 from handler.auto_reply import silent_message_reason
+from handler.conversation_context import is_contextual_follow_up_candidate
 from handler.kb_qa import KBQAHandler
 from handler.router import Router
 from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
@@ -161,7 +162,7 @@ class MessageHandler(BaseHandler):
 
         mentioned = message.has_mentioned(my_jid)
         silent_reason = silent_message_reason(message.text)
-        if silent_reason:
+        if silent_reason and not is_contextual_follow_up_candidate(message.text):
             self._log_silent(message, silent_reason)
             return
         if mentioned:
@@ -182,10 +183,12 @@ class MessageHandler(BaseHandler):
             assert group_jid is not None
             rule = auto_reply_question_rule(message.text)
             if rule is None:
-                self._log_auto_reply_skip(
-                    group_jid, auto_reply_text_skip_reason(message.text)
-                )
-                return
+                if not is_contextual_follow_up_candidate(message.text):
+                    self._log_auto_reply_skip(
+                        group_jid, auto_reply_text_skip_reason(message.text)
+                    )
+                    return
+                rule = "contextual-follow-up"
 
             skip_reason = auto_reply_limiter.skip_reason(group_jid, message)
             if skip_reason:

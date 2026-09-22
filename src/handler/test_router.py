@@ -7,6 +7,12 @@ from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunResult
 
 from handler.router import Router, IntentEnum, Intent
+from handler.conversation_context import (
+    AnswerDepth,
+    ConversationKind,
+    ConversationResolution,
+    RetrievalMode,
+)
 from models import Message
 from test_utils.mock_session import AsyncSessionMock
 from whatsapp import SendMessageRequest
@@ -396,6 +402,39 @@ async def test_router_routes_french_content_question_to_knowledge_base(
     message = Message(
         message_id="french-question",
         text="Pouvez-vous me donner le lien d'inscription au hackathon ?",
+        chat_jid="user@s.whatsapp.net",
+        sender_jid="user@s.whatsapp.net",
+    )
+
+    await router(message)
+
+    router.ask_knowledge_base.assert_awaited_once_with(message)
+    router._route.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_routes_contextual_expansion_before_generic_silent_path(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.ask_knowledge_base = AsyncMock()
+    router.ask_knowledge_base.resolve_conversation_context = AsyncMock(
+        return_value=ConversationResolution(
+            current_message="In details",
+            resolved_query="Expand the previous question.",
+            kind=ConversationKind.expansion,
+            retrieval_mode=RetrievalMode.conversational_followup,
+            answer_depth=AnswerDepth.detailed,
+            is_follow_up=True,
+        )
+    )
+    router._route = AsyncMock(return_value=IntentEnum.other)
+    message = Message(
+        message_id="contextual-expansion",
+        text="In details",
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
     )
