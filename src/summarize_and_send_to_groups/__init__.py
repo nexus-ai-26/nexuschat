@@ -2,54 +2,43 @@ import asyncio
 import logging
 from datetime import datetime
 
-from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunResult
 from sqlmodel import desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
-from tenacity import (
-    before_sleep_log,
-    retry,
-    stop_after_attempt,
-    wait_random_exponential,
-)
 
 from config import Settings
 from models import Group, Message
+from services.group_control import group_is_selected
 from services.prompt_manager import prompt_manager
 from utils.chat_text import chat2text
-from utils.llm_provider import configured_model
+from utils.llm_provider import run_with_provider_fallback
 from utils.opt_out import get_opt_out_map
 from whatsapp import SendMessageRequest, WhatsAppClient
 
 logger = logging.getLogger(__name__)
 
 
-@retry(
-    wait=wait_random_exponential(min=1, max=30),
-    stop=stop_after_attempt(6),
-    before_sleep=before_sleep_log(logger, logging.DEBUG),
-    reraise=True,
-)
 async def summarize(
     session: AsyncSession, settings: Settings, group_name: str, messages: list[Message]
 ) -> AgentRunResult[str]:
-    agent = Agent(
-        model=configured_model(settings),
-        # TODO: move to jinja?
-        system_prompt=prompt_manager.render("quick_summary.j2", group_name=group_name),
-        output_type=str,
-    )
-
     # Get opt-out map for all senders in the history
     all_jids = {m.sender_jid for m in messages}
     opt_out_map = await get_opt_out_map(session, list(all_jids))
 
-    return await agent.run(chat2text(messages, opt_out_map))
+    await session.commit()
+    return await run_with_provider_fallback(
+        settings,
+        system_prompt=prompt_manager.render("quick_summary.j2", group_name=group_name),
+        prompt=chat2text(messages, opt_out_map),
+        output_type=str,
+    )
 
 
 async def summarize_and_send_to_group(
     settings: Settings, session, whatsapp: WhatsAppClient, group: Group
 ):
+    if not group_is_selected(group) or group.paused:
+        return
     resp = await session.exec(
         select(Message)
         .where(Message.group_jid == group.group_jid)
@@ -77,7 +66,11 @@ async def summarize_and_send_to_group(
         )
 
         # Send the summary to the community groups
-        community_groups = await group.get_related_community_groups(session)
+        community_groups = [
+            community_group
+            for community_group in await group.get_related_community_groups(session)
+            if group_is_selected(community_group) and not community_group.paused
+        ]
         for cg in community_groups:
             await whatsapp.send_message(
                 SendMessageRequest(phone=cg.group_jid, message=result.output)
@@ -96,10 +89,17 @@ async def summarize_and_send_to_group(
 async def summarize_and_send_to_groups(
     settings: Settings, session: AsyncSession, whatsapp: WhatsAppClient
 ):
-    groups = await session.exec(select(Group).where(Group.managed == True))
+    groups = await session.exec(
+        select(Group).where(
+            (
+                (Group.managed == True) | (Group.selected == True)  # noqa: E712
+            )
+        )
+    )
     tasks = [
         summarize_and_send_to_group(settings, session, whatsapp, group)
         for group in list(groups.all())
+        if group_is_selected(group) and not group.paused
     ]
     errs = await asyncio.gather(*tasks, return_exceptions=True)
     for e in errs:

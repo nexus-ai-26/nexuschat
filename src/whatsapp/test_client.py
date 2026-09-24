@@ -54,14 +54,12 @@ async def test_get_my_jid_new_device_shape(
 ):
     """Newer gowa returns a device UUID in `device` and the JID in `jid`."""
     httpx_mock.add_response(
-        url="http://test-api/app/devices",
+        url="http://test-api/devices",
         json={
             "code": "SUCCESS",
-            "message": "Fetch device success",
             "results": [
                 {
-                    "name": "llm.org.il",
-                    "device": "d44c0c8b-8443-4128-a9d7-1708db4c2020",
+                    "device_id": "d44c0c8b-8443-4128-a9d7-1708db4c2020",
                     "jid": "972545380874@s.whatsapp.net",
                 }
             ],
@@ -77,6 +75,10 @@ async def test_get_my_jid_legacy_device_shape(
     client: WhatsAppClient, httpx_mock: HTTPXMock
 ):
     """Older gowa returns the JID directly in `device`."""
+    httpx_mock.add_response(
+        url="http://test-api/devices",
+        json={"code": "SUCCESS", "results": []},
+    )
     httpx_mock.add_response(
         url="http://test-api/app/devices",
         json={
@@ -111,3 +113,40 @@ async def test_send_message(client: WhatsAppClient, httpx_mock: HTTPXMock):
     assert response.code == "200"
     assert response.results is not None
     assert response.results.message_id == "msg_123"
+
+
+@pytest.mark.asyncio
+async def test_get_group_member_count_uses_live_participants(
+    client: WhatsAppClient, httpx_mock: HTTPXMock
+):
+    httpx_mock.add_response(
+        url="http://test-api/group/participants?group_id=group%40g.us",
+        json={
+            "code": "200",
+            "results": {
+                "data": [
+                    {
+                        "JID": "group@g.us",
+                        "Participants": [
+                            {"JID": "one@s.whatsapp.net"},
+                            {"JID": "two@s.whatsapp.net"},
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+
+    assert await client.get_group_member_count("group@g.us") == 2
+
+
+@pytest.mark.asyncio
+async def test_get_group_member_count_returns_none_without_participant_data(
+    client: WhatsAppClient, httpx_mock: HTTPXMock
+):
+    httpx_mock.add_response(
+        url="http://test-api/group/participants?group_id=group%40g.us",
+        json={"code": "200", "results": {"data": [{"JID": "group@g.us"}]}},
+    )
+
+    assert await client.get_group_member_count("group@g.us") is None

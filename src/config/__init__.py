@@ -3,7 +3,7 @@ from functools import lru_cache
 from os import environ
 from typing import Annotated, Final, Self
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from whatsapp.jid import (
@@ -13,6 +13,8 @@ from whatsapp.jid import (
     LegacyUserServer,
     parse_jid,
 )
+
+from .trusted_facts import TRUSTED_APPLICATION_FACTS as TRUSTED_APPLICATION_FACTS
 
 # Provider prefixes this app manages credentials for.
 # prefix -> (Settings attribute, environment variable pydantic-ai reads)
@@ -54,10 +56,11 @@ class Settings(BaseSettings):
     # `model_name` resolves to — see `validate_model_credentials`.
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
     openrouter_api_key: str | None = None
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-chat"
+    deepseek_model: str = "deepseek-flash"
     kimi_api_key: str | None = None
     kimi_base_url: str = "https://api.moonshot.ai/v1"
     kimi_model: str = "kimi-k2-turbo-preview"
@@ -72,8 +75,8 @@ class Settings(BaseSettings):
     voyage_max_retries: int = 5
 
     # Model settings
-    model_name: str = "openai-responses:gpt-5.4-mini"
-    llm_provider_order: str = "openai"
+    model_name: str = "openai-responses:gpt-5.6-luna"
+    llm_provider_order: str = "openai,deepseek,gemini,kimi,openrouter,nvidia,groq"
     ai_enabled: bool = True
 
     # Direct Message settings
@@ -102,7 +105,29 @@ class Settings(BaseSettings):
     escalation_secondary_jids: Annotated[list[str], NoDecode] = []
     debug: bool = False
     log_level: str = "INFO"
-    logfire_token: str
+    logfire_token: str | None = None
+    logfire_send_to_logfire: bool = False
+
+    # Runtime reliability limits.
+    agent_concurrency_limit: int = 4
+    background_concurrency_limit: int = 1
+    reply_deadline_seconds: float = 45.0
+    webhook_queue_maxsize: int = 100
+    provider_timeout_seconds: float = 30.0
+    provider_permanent_cooldown_seconds: float = 60 * 60
+    provider_rate_limit_cooldown_seconds: float = 60.0
+    send_retry_attempts: int = 3
+    send_retry_base_seconds: float = 0.5
+    failure_reply_cooldown_seconds: float = 600.0
+    catchup_window_hours: float = 1.0
+    catchup_max_replies: int = 5
+    catchup_delay_seconds: float = 2.5
+    catchup_start_delay_seconds: float = 30.0
+    catchup_admin_secret: str | None = None
+    dashboard_admin_secret: str | None = None
+    other_bot_jids: Annotated[list[str], NoDecode] = []
+    recent_message_context_limit: int = Field(default=20, ge=1, le=100)
+    max_reply_chars: int = Field(default=5000, ge=5000)
 
     @field_validator("qa_testers")
     @classmethod
@@ -152,6 +177,7 @@ class Settings(BaseSettings):
         "kb_exclude_subject_prefixes",
         "escalation_primary_jids",
         "escalation_secondary_jids",
+        "other_bot_jids",
         mode="before",
     )
     @classmethod

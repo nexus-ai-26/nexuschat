@@ -42,6 +42,9 @@ async def test_message_mentions(mock_session):
     assert message.has_mentioned("1234567890@s.whatsapp.net")
     assert not message.has_mentioned("9876543210@s.whatsapp.net")
 
+    nexus_message = message.model_copy(update={"text": "@Nexus what changed?"})
+    assert nexus_message.has_mentioned("9876543210@s.whatsapp.net")
+
 
 async def test_message_with_image(mock_session):
     # {'from': '972546660040:33@s.whatsapp.net in 972546660040@s.whatsapp.net',

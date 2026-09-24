@@ -7,6 +7,7 @@ from config import Settings
 from handler.base_handler import BaseHandler
 from handler.knowledge_base_answers import KnowledgeBaseAnswers
 from models import Message, Group
+from services.group_control import group_is_selected
 from whatsapp import WhatsAppClient
 
 logger = logging.getLogger(__name__)
@@ -113,19 +114,27 @@ class KBQAHandler(BaseHandler):
         # Try exact match first (case-insensitive)
         stmt = select(Group).where(
             col(Group.group_name).ilike(group_name),
-            Group.managed == True,  # noqa: E712  https://stackoverflow.com/a/18998106
+            ((Group.managed == True) | (Group.selected == True)),  # noqa: E712
         )
         result = await self.session.exec(stmt)
-        groups = list(result.all())
+        groups = [
+            group
+            for group in result.all()
+            if group_is_selected(group) and not group.paused
+        ]
 
         if not groups:
             # Fallback to partial match if no exact match found
             stmt = select(Group).where(
                 col(Group.group_name).ilike(f"%{group_name}%"),
-                Group.managed == True,  # noqa: E712  https://stackoverflow.com/a/18998106
+                ((Group.managed == True) | (Group.selected == True)),  # noqa: E712
             )
             result = await self.session.exec(stmt)
-            groups = list(result.all())
+            groups = [
+                group
+                for group in result.all()
+                if group_is_selected(group) and not group.paused
+            ]
 
         if len(groups) == 0:
             await self.send_message(

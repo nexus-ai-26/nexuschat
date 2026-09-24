@@ -33,6 +33,14 @@ async def gather_groups(session: AsyncSession, client: WhatsAppClient) -> None:
                 group_topic=g.topic,
                 owner_jid=owner_usr,
                 managed=existing_group.managed if existing_group else False,
+                selected=existing_group.selected if existing_group else False,
+                paused=existing_group.paused if existing_group else False,
+                paused_by=existing_group.paused_by if existing_group else None,
+                paused_at=existing_group.paused_at if existing_group else None,
+                resumed_at=existing_group.resumed_at if existing_group else None,
+                member_policy=existing_group.member_policy
+                if existing_group
+                else "allow",
                 community_keys=existing_group.community_keys
                 if existing_group
                 else None,

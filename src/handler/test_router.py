@@ -7,6 +7,12 @@ from pydantic_ai import Agent
 from pydantic_ai.agent import AgentRunResult
 
 from handler.router import Router, IntentEnum, Intent
+from handler.conversation_context import (
+    AnswerDepth,
+    ConversationKind,
+    ConversationResolution,
+    RetrievalMode,
+)
 from models import Message
 from test_utils.mock_session import AsyncSessionMock
 from whatsapp import SendMessageRequest
@@ -37,7 +43,7 @@ def mock_embedding_client():
 def test_message():
     return Message(
         message_id="test_id",
-        text="Hello bot!",
+        text="Could you assist",
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
         timestamp=datetime.now(timezone.utc),
@@ -139,6 +145,7 @@ async def test_router_ask_question_route(
         SendMessageRequest(
             phone="user@s.whatsapp.net",
             message="cool response",
+            reply_message_id="test_id",
         )
     )
 
@@ -152,6 +159,7 @@ async def test_router_summarize_route(
     mock_settings: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    test_message.text = "What happened this week?"
     # Mock the Agent class for routing
     mock_route_agent = MockAgent(Intent(intent=IntentEnum.summarize))
 
@@ -187,17 +195,13 @@ async def test_router_summarize_route(
 
     # Create router instance
     router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.ask_knowledge_base = AsyncMock()
 
     # Test the route
     await router(test_message)
 
-    # Verify the summary was sent
-    mock_whatsapp.send_message.assert_called_once_with(
-        SendMessageRequest(
-            phone="user@s.whatsapp.net",
-            message="Summary of messages",
-        )
-    )
+    router.ask_knowledge_base.assert_awaited_once_with(test_message)
+    mock_whatsapp.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -209,6 +213,7 @@ async def test_router_other_route(
     mock_settings: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    test_message.text = "Tell me about weather"
     # Mock the Agent class
     mock_agent = MockAgent(Intent(intent=IntentEnum.other))
     monkeypatch.setattr(Agent, "__init__", lambda *args, **kwargs: None)
@@ -225,8 +230,7 @@ async def test_router_other_route(
     # Test the route
     await router(test_message)
 
-    # Verify the default response message was sent
-    mock_whatsapp.send_message.assert_called_once()
+    mock_whatsapp.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -262,6 +266,7 @@ async def test_router_summarize_with_opt_out(
     mock_settings: Mock,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    test_message.text = "Could you assist"
     # Mock the Agent class for routing
     mock_route_agent = MockAgent(Intent(intent=IntentEnum.summarize))
 
@@ -307,28 +312,15 @@ async def test_router_summarize_with_opt_out(
         # Test the route
         await router(test_message)
 
-        # Verify get_opt_out_map was called
-        mock_get_opt_out_map.assert_called_once()
+        # Summaries are intentionally silent unless a grounded content request
+        # reaches the knowledge-base path.
+        mock_get_opt_out_map.assert_not_called()
 
-    # Verify the summary was sent
-    mock_whatsapp.send_message.assert_called_once_with(
-        SendMessageRequest(
-            phone="user@s.whatsapp.net",
-            message="Summary of messages",
-        )
-    )
-
-    # Verify the prompt contained the opted-out name (indirectly via agent call)
-    # We can't easily check the exact prompt string passed to agent.run because of how we mocked it,
-    # but we can verify that the code path was executed without errors.
-    # To be more precise, we could inspect the call args of mock_summarize_agent.run if we had access to it directly,
-    # but here we are using a closure.
-    # However, since we mocked get_opt_out_map and asserted it was called, and the code uses the result,
-    # it gives us confidence.
+    mock_whatsapp.send_message.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_router_answers_clear_banter_without_llm(
+async def test_router_nudges_clear_banter_without_llm(
     mock_session: AsyncSessionMock,
     mock_whatsapp: AsyncMock,
     mock_embedding_client: AsyncMock,
@@ -346,7 +338,55 @@ async def test_router_answers_clear_banter_without_llm(
     await router(message)
 
     router.send_message.assert_awaited_once()
-    assert "banter" in router.send_message.await_args.args[1]
+    assert (
+        "here to help with the UniPods METI programme"
+        in (router.send_message.await_args.args[1])
+    )
+
+
+@pytest.mark.asyncio
+async def test_fixed_bot_reply_only_matches_assistant_questions(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.send_message = AsyncMock()
+    router.ask_knowledge_base = AsyncMock()
+    router._route = AsyncMock(return_value=IntentEnum.ask_question)
+
+    programme_questions = [
+        "how many teams ( for bot hackathon) that still need someone",
+        "what is this hackathon about?",
+    ]
+    for index, text in enumerate(programme_questions):
+        message = Message(
+            message_id=f"programme-{index}",
+            text=text,
+            chat_jid="user@s.whatsapp.net",
+            sender_jid="user@s.whatsapp.net",
+        )
+        await router(message)
+
+    assert router.send_message.await_count == 0
+    assert router.ask_knowledge_base.await_count == 2
+
+    router.ask_knowledge_base.reset_mock()
+    await router(
+        Message(
+            message_id="assistant-question",
+            text="who are you",
+            chat_jid="user@s.whatsapp.net",
+            sender_jid="user@s.whatsapp.net",
+        )
+    )
+
+    router.send_message.assert_awaited_once()
+    assert router.send_message.await_args.args[1] == (
+        "I'm Nexus, the UniPods METI AI programme assistant. Ask me about sessions, deadlines, MIT, Wadhwani or links."
+    )
+    router.ask_knowledge_base.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -362,6 +402,39 @@ async def test_router_routes_french_content_question_to_knowledge_base(
     message = Message(
         message_id="french-question",
         text="Pouvez-vous me donner le lien d'inscription au hackathon ?",
+        chat_jid="user@s.whatsapp.net",
+        sender_jid="user@s.whatsapp.net",
+    )
+
+    await router(message)
+
+    router.ask_knowledge_base.assert_awaited_once_with(message)
+    router._route.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_routes_contextual_expansion_before_generic_silent_path(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    router = Router(mock_session, mock_whatsapp, mock_embedding_client, mock_settings)
+    router.ask_knowledge_base = AsyncMock()
+    router.ask_knowledge_base.resolve_conversation_context = AsyncMock(
+        return_value=ConversationResolution(
+            current_message="In details",
+            resolved_query="Expand the previous question.",
+            kind=ConversationKind.expansion,
+            retrieval_mode=RetrievalMode.conversational_followup,
+            answer_depth=AnswerDepth.detailed,
+            is_follow_up=True,
+        )
+    )
+    router._route = AsyncMock(return_value=IntentEnum.other)
+    message = Message(
+        message_id="contextual-expansion",
+        text="In details",
         chat_jid="user@s.whatsapp.net",
         sender_jid="user@s.whatsapp.net",
     )

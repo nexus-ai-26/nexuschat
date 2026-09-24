@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -7,15 +8,8 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from pydantic_ai.agent import AgentRunResult
-from sqlmodel import select, desc
+from sqlmodel import col, desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_random_exponential,
-)
 from voyageai.client_async import AsyncClient
 
 from models import Message
@@ -31,12 +25,33 @@ from .auto_reply import (
     is_no_answer,
     is_too_short_for_auto_reply,
     normalize_question,
+    silent_message_reason,
 )
 from .base_handler import BaseHandler
-from .escalation import offer_escalation
+from .conversation_context import (
+    AnswerDepth,
+    ConversationKind,
+    ConversationResolution,
+    RetrievalMode,
+    format_conversation_context,
+    is_contextual_follow_up_candidate,
+    resolve_conversation_context,
+)
 from config import Settings
+from config.trusted_facts import (
+    format_trusted_application_facts,
+    trusted_admin_display_names,
+    trusted_admin_jids,
+    trusted_contacts_for_query,
+)
 from services.prompt_manager import prompt_manager
-from utils.llm_provider import is_rate_limit_error, run_with_provider_fallback
+from services.summary_timeframe import SummaryWindow, parse_summary_timeframe
+from services.document_ingestion import (
+    document_topics_for_message,
+    index_document,
+    is_supported_document,
+)
+from utils.llm_provider import ProviderFallbackError, run_with_provider_fallback
 from utils.reply_text import clean_visible_reply
 
 
@@ -44,11 +59,35 @@ from utils.reply_text import clean_visible_reply
 logger = logging.getLogger(__name__)
 
 _FILE_REQUEST_RE = re.compile(
-    r"(?:\b(?:send|share|forward|resend|download)\b.*\b(?:file|document|pdf|guideline\w*|recording\w*)\b)"
-    r"|(?:\b(?:file|document|pdf|guideline\w*|recording\w*)\b.*\b(?:send|share|forward|resend|download)\b)",
+    r"(?:\b(?:send|share|forward|resend|download)\b.*\b(?:file|document|pdf|guideline\w*|"
+    r"recording\w*|transcript\w*|slide\w*|presentation\w*)\b)"
+    r"|(?:\b(?:file|document|pdf|guideline\w*|recording\w*|transcript\w*|"
+    r"slide\w*|presentation\w*)\b.*\b(?:send|share|forward|resend|download)\b)",
     re.IGNORECASE,
 )
 _MAX_FORWARD_BYTES = 25 * 1024 * 1024
+_RECAP_RE = re.compile(
+    r"\b(?:recap|summary|summarize|this\s+week|what\s+happened|updates?|"
+    r"whole\s+programme|everything\s+important|recently|last\s+(?:few\s+)?days?|"
+    r"last\s+two\s+weeks?|past\s+(?:week|two\s+weeks)|fortnight)\b",
+    re.IGNORECASE,
+)
+_RECENT_UPDATE_RE = re.compile(
+    r"\b(?:correction|corrected|update|updated|announcement|extended|changed|"
+    r"what\s+changed)\b",
+    re.IGNORECASE,
+)
+_GROUP_MEMBER_COUNT_RE = re.compile(
+    r"(?:\b(?:how\s+many|number\s+of|count\s+of)\b.*\b(?:members?|participants?)\b|"
+    r"\b(?:current(?:ly)?\s+)?group\s+size\b|"
+    r"\b(?:current(?:ly)?\s+)?(?:members?|participants?)\b.*\b(?:count|number|size|many)\b)",
+    re.IGNORECASE,
+)
+_NON_ANSWER_REPLY_RE = re.compile(
+    r"i\s+don['’]?t\s+have.*programme\s+materials|"
+    r"flag\s+this.*organizer|trouble\s+answering|please\s+ask.*programme\s+materials",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class KnowledgeBaseAnswers(BaseHandler):
@@ -70,6 +109,16 @@ class KnowledgeBaseAnswers(BaseHandler):
                 self._log_auto_reply_skip(message, "no text")
             return False
 
+        silent_reason = silent_message_reason(message.text)
+        if silent_reason and not is_contextual_follow_up_candidate(message.text):
+            logger.info(
+                "RAG reply skipped chat=%s message=%s reason=%s",
+                message.chat_jid,
+                message.message_id,
+                silent_reason,
+            )
+            return False
+
         if auto_reply:
             skip = await self._auto_reply_pre_check(message)
             if skip:
@@ -80,14 +129,24 @@ class KnowledgeBaseAnswers(BaseHandler):
         bot_jid = my_jid.normalize_str()
 
         # Exclude test-like, repeated, and bot-authored context on every reply path.
+        context_limit = self._recent_message_context_limit()
         stmt = (
             select(Message)
             .where(Message.chat_jid == message.chat_jid)
             .order_by(desc(Message.timestamp))
-            .limit(7)
+            .limit(context_limit)
         )
         res = await self.session.exec(stmt)
-        history: list[Message] = list(res.all())
+        raw_history: list[Message] = list(reversed(list(res.all())))
+        resolution = resolve_conversation_context(
+            message.text,
+            raw_history,
+            current_sender=message.sender_jid,
+            bot_jid=bot_jid,
+            current_message_id=message.message_id,
+        )
+        effective_query = resolution.resolved_query
+        history = raw_history
         history = self._filter_auto_reply_messages(
             history,
             current_question=message.text,
@@ -95,60 +154,101 @@ class KnowledgeBaseAnswers(BaseHandler):
             group_jid=message.group_jid,
             bot_jid=bot_jid,
         )
+        summary_window = (
+            parse_summary_timeframe(message.text)
+            if resolution.retrieval_mode == RetrievalMode.summary
+            else None
+        )
+        organizer_history = await self._recent_organizer_messages(
+            message, query_text=effective_query, window=summary_window
+        )
+        broader_context = await self._recent_summary_messages(
+            message,
+            query_text=effective_query,
+            bot_jid=bot_jid,
+            window=summary_window,
+        )
+
+        # Dynamic membership is answered only from live WhatsApp state.  If the
+        # SDK/bridge cannot provide it, stay silent rather than letting the model
+        # manufacture a number.
+        if self._is_group_member_count_request(effective_query):
+            member_count = await self._live_group_member_count(message)
+            if member_count is None:
+                logger.info(
+                    "RAG reply skipped chat=%s message=%s reason=live member count unavailable",
+                    message.chat_jid,
+                    message.message_id,
+                )
+                return False
+            await self.send_message(
+                message.chat_jid,
+                f"This group currently has {member_count} members.",
+                in_reply_to=message.message_id,
+            )
+            return True
 
         # Get opt-out map
-        all_jids = {m.sender_jid for m in history}
+        all_jids = {m.sender_jid for m in history + organizer_history}
         all_jids.add(message.sender_jid)
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
+        # Release any DB transaction/connection before the first provider call.
+        await self.session.commit()
 
-        rephrased_result = await self.rephrasing_agent(
-            my_jid.user, message, history, opt_out_map
-        )
-        # Get query embedding
-        embedded_question = (
-            await voyage_embed_text(self.embedding_client, [rephrased_result.output])
-        )[0]
-
-        # Determine which groups to search
-        group_jids = None
-        if message.group:
-            group_jids = [message.group.group_jid]
-            if message.group.community_keys:
-                related_groups = await message.group.get_related_community_groups(
-                    self.session
-                )
-                group_jids.extend([g.group_jid for g in related_groups])
-
-        # Use hybrid search to get topics with their source messages
         from search.hybrid_search import format_search_results_for_prompt, hybrid_search
 
-        search_results = await hybrid_search(
-            session=self.session,
-            query=message.text,
-            query_embedding=embedded_question,
-            group_jids=group_jids,
-            vector_limit=10,
-            messages_per_topic=5,
-        )
-        search_results = self._filter_auto_reply_results(
-            search_results,
-            current_question=message.text,
-            current_sender=message.sender_jid,
-            group_jid=message.group_jid,
-            bot_jid=bot_jid,
-        )
+        document_results, document_error = await self._quoted_document_results(message)
+        if document_error:
+            logger.info(
+                "RAG reply skipped chat=%s message=%s reason=unreadable document",
+                message.chat_jid,
+                message.message_id,
+            )
+            return False
 
-        weak_match_context = False
-        if not has_confident_match(search_results):
-            weak_match_context = True
+        if document_results:
+            # A quoted document is the authoritative source for this question.
+            # Do not mix unrelated group links or conversation gossip into it.
+            search_results = document_results
+            weak_match_context = False
+        else:
+            try:
+                rephrased_result = await self.rephrasing_agent(
+                    my_jid.user,
+                    message,
+                    history,
+                    opt_out_map,
+                    resolution=resolution,
+                )
+            except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+                self._log_provider_skip(message, error)
+                return False
+            retrieval_query = rephrased_result.output.strip() or effective_query
+            embedded_question = (
+                await voyage_embed_text(self.embedding_client, [retrieval_query])
+            )[0]
+
+            # Determine which groups to search
+            group_jids = None
+            if message.group:
+                group_jids = [message.group.group_jid]
+                if message.group.community_keys:
+                    related_groups = await message.group.get_related_community_groups(
+                        self.session
+                    )
+                    group_jids.extend([g.group_jid for g in related_groups])
+
             search_results = await hybrid_search(
                 session=self.session,
-                query=message.text,
+                query=retrieval_query,
                 query_embedding=embedded_question,
                 group_jids=group_jids,
-                vector_limit=10,
-                messages_per_topic=5,
-                max_vector_distance=0.6,
+                vector_limit=20
+                if resolution.retrieval_mode == RetrievalMode.summary
+                else 10,
+                messages_per_topic=8
+                if resolution.retrieval_mode == RetrievalMode.summary
+                else 5,
             )
             search_results = self._filter_auto_reply_results(
                 search_results,
@@ -157,41 +257,63 @@ class KnowledgeBaseAnswers(BaseHandler):
                 group_jid=message.group_jid,
                 bot_jid=bot_jid,
             )
-            recent_group_messages = await self._recent_group_messages(
-                message.group_jid,
-                current_question=message.text,
-                current_sender=message.sender_jid,
-                bot_jid=bot_jid,
-                limit=50,
-            )
-        else:
-            recent_group_messages = []
+            weak_match_context = False
+            if not has_confident_match(search_results):
+                weak_match_context = True
+                search_results = await hybrid_search(
+                    session=self.session,
+                    query=retrieval_query,
+                    query_embedding=embedded_question,
+                    group_jids=group_jids,
+                    vector_limit=20
+                    if resolution.retrieval_mode == RetrievalMode.summary
+                    else 10,
+                    messages_per_topic=8
+                    if resolution.retrieval_mode == RetrievalMode.summary
+                    else 5,
+                    max_vector_distance=0.6,
+                )
+                search_results = self._filter_auto_reply_results(
+                    search_results,
+                    current_question=message.text,
+                    current_sender=message.sender_jid,
+                    group_jid=message.group_jid,
+                    bot_jid=bot_jid,
+                )
+        # Search is complete; do not retain a DB connection while generating.
+        await self.session.commit()
 
-        if await self._try_forward_file(message, search_results):
+        if await self._try_forward_file(
+            message, search_results, request_text=effective_query
+        ):
             return True
 
         # Format results for the generation agent
         formatted_topics = format_search_results_for_prompt(search_results, opt_out_map)
-        if weak_match_context and recent_group_messages:
-            formatted_topics += "\n\n## Last 50 group messages:\n" + chat2text(
-                recent_group_messages, opt_out_map
-            )
-
+        trusted_facts = format_trusted_application_facts(effective_query)
         # Also prepare distances for logging
         similar_topics_distances = [
             f"topic_distance: {r.vector_distance}" for r in search_results
         ]
 
         sender_number = parse_jid(message.sender_jid).user
-        generation_result = await self.generation_agent(
-            message.text,
-            formatted_topics,
-            message.sender_jid,
-            history,
-            opt_out_map,
-            auto_reply=auto_reply,
-            weak_match=weak_match_context,
-        )
+        try:
+            generation_result = await self.generation_agent(
+                effective_query,
+                formatted_topics,
+                message.sender_jid,
+                history,
+                opt_out_map,
+                auto_reply=auto_reply,
+                weak_match=weak_match_context,
+                organizer_history=organizer_history,
+                trusted_application_facts=trusted_facts,
+                conversation_resolution=resolution,
+                broader_context=broader_context,
+            )
+        except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+            self._log_provider_skip(message, error)
+            return False
         logger.info(
             "RAG query completed sender=%s chat=%s retrieved_topics=%s "
             "total_messages=%s similarity_scores=%s",
@@ -202,19 +324,41 @@ class KnowledgeBaseAnswers(BaseHandler):
             similar_topics_distances,
         )
 
-        response_text = self._clean_auto_reply_text(generation_result.output)
-        if is_no_answer(response_text):
-            if auto_reply:
-                self._log_auto_reply_skip(message, "model returned NO_ANSWER")
-            await offer_escalation(self, message)
+        allowed_contacts = trusted_contacts_for_query(effective_query)
+        response_text = self._clean_auto_reply_text(
+            generation_result.output,
+            allowed_phone_numbers=allowed_contacts,
+        )
+        if not response_text or is_no_answer(response_text):
+            self._log_auto_reply_skip(message, "model returned NO_ANSWER")
+            if not message.chat_jid.endswith("@g.us"):
+                await self.send_message(
+                    message.chat_jid,
+                    "I don't have that detail yet. Please ask the organizers, and I'll gladly help with anything about sessions, deadlines, MIT, Wadhwani or links.",
+                    in_reply_to=message.message_id,
+                )
+                return True
+            return False
+        if _NON_ANSWER_REPLY_RE.search(response_text):
+            self._log_auto_reply_skip(message, "model returned non-answer text")
             return False
         await self.send_message(
             message.chat_jid,
             response_text,
-            # in_reply_to=message.message_id,
+            in_reply_to=message.message_id,
+            allowed_phone_numbers=allowed_contacts,
         )
 
         return True
+
+    @staticmethod
+    def _log_provider_skip(message: Message, error: Exception) -> None:
+        logger.warning(
+            "RAG reply skipped chat=%s message=%s reason=provider failure error=%s",
+            message.chat_jid,
+            message.message_id,
+            type(error).__name__,
+        )
 
     @staticmethod
     def _log_auto_reply_skip(message: Message, reason: str) -> None:
@@ -222,7 +366,11 @@ class KnowledgeBaseAnswers(BaseHandler):
 
     async def _auto_reply_pre_check(self, message: Message) -> str | None:
         if is_too_short_for_auto_reply(message.text):
-            return "too short"
+            if not is_contextual_follow_up_candidate(message.text):
+                return "too short"
+            resolution = await self.resolve_conversation_context(message)
+            if not resolution.is_follow_up:
+                return "too short"
         if not message.group_jid:
             return "missing group_jid"
         return auto_reply_limiter.skip_reason(message.group_jid, message)
@@ -253,6 +401,133 @@ class KnowledgeBaseAnswers(BaseHandler):
             group_jid=group_jid,
             bot_jid=bot_jid,
         )
+
+    async def _recent_organizer_messages(
+        self,
+        message: Message,
+        *,
+        query_text: str | None = None,
+        window: SummaryWindow | None = None,
+    ) -> list[Message]:
+        """Load recent organizer statements for recap/update questions.
+
+        These messages remain attributed chat statements.  They are useful for
+        reporting a correction or announcement, but are not promoted to permanent
+        programme facts by this lookup alone.
+        """
+        query = query_text or message.text or ""
+        if not message.group_jid or not (
+            _RECAP_RE.search(query) or _RECENT_UPDATE_RE.search(query)
+        ):
+            return []
+
+        organizer_jids: set[str] = trusted_admin_jids()
+        if message.group and message.group.owner_jid:
+            organizer_jids.add(message.group.owner_jid)
+        for value in (
+            *(getattr(self.settings, "escalation_primary_jids", []) or []),
+            *(getattr(self.settings, "escalation_secondary_jids", []) or []),
+        ):
+            if str(value).strip():
+                organizer_jids.add(str(value).strip())
+        if not organizer_jids:
+            logger.info(
+                "recap organizer context empty group=%s reason=no organizer identities",
+                message.group_jid,
+            )
+            return []
+
+        summary_window = window or parse_summary_timeframe(query)
+        stmt = (
+            select(Message)
+            .where(Message.group_jid == message.group_jid)
+            .where(Message.timestamp >= summary_window.start)
+            .where(Message.timestamp <= summary_window.end)
+            .order_by(col(Message.timestamp))
+            .limit(100)
+        )
+        result = await self.session.exec(stmt)
+        messages = [
+            candidate
+            for candidate in result.all()
+            if candidate.sender_jid in organizer_jids and candidate.text
+        ]
+        messages = self._deduplicate_messages(messages)
+        logger.info(
+            "recap organizer context group=%s messages=%s window=%s",
+            message.group_jid,
+            len(messages),
+            summary_window.label,
+        )
+        return messages
+
+    async def _recent_summary_messages(
+        self,
+        message: Message,
+        *,
+        query_text: str,
+        bot_jid: str,
+        window: SummaryWindow | None = None,
+    ) -> list[Message]:
+        """Load a broader chronological window only for recap-style questions."""
+
+        if not message.group_jid or not _RECAP_RE.search(query_text):
+            return []
+
+        summary_window = window or parse_summary_timeframe(query_text)
+        stmt = (
+            select(Message)
+            .where(Message.group_jid == message.group_jid)
+            .where(Message.timestamp >= summary_window.start)
+            .where(Message.timestamp <= summary_window.end)
+            .order_by(col(Message.timestamp))
+            .limit(200)
+        )
+        result = await self.session.exec(stmt)
+        messages = list(result.all())
+        return self._filter_auto_reply_messages(
+            messages,
+            current_question=message.text or "",
+            current_sender=message.sender_jid,
+            group_jid=message.group_jid,
+            bot_jid=bot_jid,
+        )
+
+    @staticmethod
+    def _summary_window_days(query_text: str) -> int:
+        window = parse_summary_timeframe(query_text)
+        return max(1, (window.end - window.start).days)
+
+    async def _quoted_document_results(self, message: Message):
+        """Return only the quoted document's chunks, or mark an unreadable file."""
+        if not message.reply_to_id:
+            return [], False
+        source = await self.session.get(Message, message.reply_to_id)
+        await self.session.commit()
+        if source is None or not is_supported_document(source):
+            return [], False
+
+        topics = await document_topics_for_message(self.session, source.message_id)
+        await self.session.commit()
+        extracted_marker = "\n\n" not in (source.text or "")
+        if extracted_marker or not topics:
+            await index_document(
+                self.session,
+                self.embedding_client,
+                self.whatsapp,
+                source,
+            )
+            topics = await document_topics_for_message(self.session, source.message_id)
+        await self.session.commit()
+        if not topics:
+            return [], True
+
+        from search.hybrid_search import SearchResult
+
+        return [
+            SearchResult(topic=topic, messages=[], vector_distance=0.0)
+            for topic in topics
+        ], False
 
     def _configured_kb_exclude_subject_prefixes(self) -> tuple[str, ...]:
         configured = getattr(
@@ -300,7 +575,12 @@ class KnowledgeBaseAnswers(BaseHandler):
             and len(message.text.split()) <= 12
             and auto_reply_question_rule(message.text) is not None
         )
-        return not (is_recent and is_other_group_member and is_short_question)
+        return not (
+            is_recent
+            and is_other_group_member
+            and is_short_question
+            and not _RECENT_UPDATE_RE.search(message.text or "")
+        )
 
     def _filter_auto_reply_messages(
         self,
@@ -312,7 +592,7 @@ class KnowledgeBaseAnswers(BaseHandler):
         bot_jid: str,
     ) -> list[Message]:
         now = datetime.now(timezone.utc)
-        return [
+        filtered = [
             message
             for message in messages
             if self._is_auto_reply_context_message_allowed(
@@ -324,6 +604,50 @@ class KnowledgeBaseAnswers(BaseHandler):
                 now=now,
             )
         ]
+        return self._deduplicate_messages(filtered)
+
+    @staticmethod
+    def _deduplicate_messages(messages: list[Message]) -> list[Message]:
+        """Keep the newest copy of repeated text while preserving chronology."""
+
+        latest_by_text: dict[str, Message] = {}
+        without_text: list[Message] = []
+        for message in messages:
+            key = normalize_question(message.text)
+            if key:
+                latest_by_text[key] = message
+            else:
+                without_text.append(message)
+        return sorted(
+            [*latest_by_text.values(), *without_text],
+            key=KnowledgeBaseAnswers._message_timestamp,
+        )
+
+    def _recent_message_context_limit(self) -> int:
+        value = getattr(self.settings, "recent_message_context_limit", 20)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 20
+        return min(max(value, 1), 100)
+
+    @staticmethod
+    def _is_group_member_count_request(text: str | None) -> bool:
+        return bool(text and _GROUP_MEMBER_COUNT_RE.search(text))
+
+    async def _live_group_member_count(self, message: Message) -> int | None:
+        if not message.group_jid:
+            return None
+        try:
+            member_count = await self.whatsapp.get_group_member_count(message.group_jid)
+        except Exception:
+            logger.warning(
+                "Live group member lookup failed group=%s", message.group_jid
+            )
+            return None
+        return (
+            member_count
+            if isinstance(member_count, int) and member_count >= 0
+            else None
+        )
 
     def _is_excluded_auto_reply_topic(self, topic) -> bool:
         subject = (topic.subject or "").casefold().strip()
@@ -391,8 +715,14 @@ class KnowledgeBaseAnswers(BaseHandler):
             return None
         return response.content
 
-    async def _try_forward_file(self, message: Message, search_results) -> bool:
-        if not self._is_file_request(message.text or ""):
+    async def _try_forward_file(
+        self,
+        message: Message,
+        search_results,
+        *,
+        request_text: str | None = None,
+    ) -> bool:
+        if not self._is_file_request(request_text or message.text or ""):
             return False
 
         for result in search_results:
@@ -423,17 +753,17 @@ class KnowledgeBaseAnswers(BaseHandler):
         return False
 
     @staticmethod
-    def _clean_auto_reply_text(text: str) -> str:
-        """Remove citations, source blocks, identifiers, and excess sentences."""
-        return clean_visible_reply(text, max_sentences=3)
+    def _clean_auto_reply_text(
+        text: str,
+        *,
+        allowed_phone_numbers: tuple[str, ...] = (),
+    ) -> str:
+        """Remove unsafe presentation noise while preserving answer depth."""
+        return clean_visible_reply(
+            text,
+            allowed_phone_numbers=allowed_phone_numbers,
+        )
 
-    @retry(
-        retry=retry_if_exception(lambda error: not is_rate_limit_error(error)),
-        wait=wait_random_exponential(min=1, max=30),
-        stop=stop_after_attempt(6),
-        before_sleep=before_sleep_log(logger, logging.DEBUG),
-        reraise=True,
-    )
     async def generation_agent(
         self,
         query: str,
@@ -443,48 +773,142 @@ class KnowledgeBaseAnswers(BaseHandler):
         opt_out_map: dict[str, str],
         auto_reply: bool = False,
         weak_match: bool = False,
+        organizer_history: list[Message] | None = None,
+        trusted_application_facts: str | None = None,
+        live_tool_results: str | None = None,
+        conversation_resolution: ConversationResolution | None = None,
+        broader_context: list[Message] | None = None,
     ) -> AgentRunResult[str]:
         sender_user = parse_jid(sender).user
         sender_display = opt_out_map.get(sender_user, f"@{sender_user}")
+        trusted_names = trusted_admin_display_names()
+        context_messages = self._merge_context_messages(history, broader_context or [])
+        recent_context = chat2text(context_messages, opt_out_map, trusted_names)
+        history_ids = {item.message_id for item in history}
+        history_text = {
+            normalize_question(item.text)
+            for item in history
+            if normalize_question(item.text)
+        }
+        organizer_only = [
+            item
+            for item in organizer_history or []
+            if item.message_id not in history_ids
+            and normalize_question(item.text) not in history_text
+        ]
+        if organizer_only:
+            recent_context += (
+                "\n\nOrganizer statements selected for this recent update question:\n"
+                + chat2text(organizer_only, opt_out_map, trusted_names)
+            )
 
+        resolution_context = format_conversation_context(
+            conversation_resolution
+            if conversation_resolution is not None
+            else ConversationResolution(
+                current_message=query,
+                resolved_query=query,
+                kind=ConversationKind.standalone,
+                retrieval_mode=RetrievalMode.general_programme,
+                answer_depth=AnswerDepth.normal,
+            )
+        )
+        answer_depth = (
+            conversation_resolution.answer_depth.value
+            if conversation_resolution is not None
+            else "normal"
+        )
+        retrieval_mode = (
+            conversation_resolution.retrieval_mode.value
+            if conversation_resolution is not None
+            else "general_programme"
+        )
         prompt_template = f"""
         {sender_display}: {query}
-        
-        # Recent chat history:
-        {chat2text(history, opt_out_map)}
-        
-        # Related Topics:
+
+        # LIVE_TOOL_RESULTS
+        {live_tool_results or "No live tool results are available."}
+
+        # TRUSTED_APPLICATION_FACTS
+        {trusted_application_facts or "No relevant trusted application facts are available."}
+
+        # CURATED_KB_CONTEXT
         {topics}
+
+        # RECENT_CHAT_CONTEXT
+        {recent_context or "No recent chat context is available."}
+
+        # CONVERSATION_CONTEXT_RESOLUTION
+        {resolution_context}
+
+        # ANSWER_PLAN
+        retrieval_mode={retrieval_mode}
+        answer_depth={answer_depth}
         """
 
         return await run_with_provider_fallback(
             self.settings,
             system_prompt=prompt_manager.render(
-                "rag.j2", auto_reply=auto_reply, weak_match=weak_match
+                "rag.j2",
+                auto_reply=auto_reply,
+                weak_match=weak_match,
+                answer_depth=answer_depth,
+                retrieval_mode=retrieval_mode,
             ),
             prompt=prompt_template,
         )
 
-    @retry(
-        retry=retry_if_exception(lambda error: not is_rate_limit_error(error)),
-        wait=wait_random_exponential(min=1, max=30),
-        stop=stop_after_attempt(6),
-        before_sleep=before_sleep_log(logger, logging.DEBUG),
-        reraise=True,
-    )
     async def rephrasing_agent(
         self,
         my_jid: str,
         message: Message,
         history: List[Message],
         opt_out_map: dict[str, str],
+        *,
+        resolution: ConversationResolution | None = None,
     ) -> AgentRunResult[str]:
-        # We obviously need to translate the question and turn the question vebality to a title / summary text to make it closer to the questions in the rag
+        resolution_text = (
+            format_conversation_context(resolution)
+            if resolution is not None
+            else "No contextual follow-up was detected."
+        )
         return await run_with_provider_fallback(
             self.settings,
             system_prompt=prompt_manager.render("rephrase.j2", my_jid=my_jid),
             prompt=(
-                f"{message.text}\n\n## Recent chat history:\n "
-                f"{chat2text(history, opt_out_map)}"
+                f"CURRENT USER MESSAGE:\n{message.text}\n\n"
+                f"CONVERSATION CONTEXT:\n{resolution_text}\n\n"
+                f"RECENT CHAT HISTORY:\n"
+                f"{chat2text(history, opt_out_map, trusted_admin_display_names())}"
             ),
+        )
+
+    @staticmethod
+    def _merge_context_messages(
+        history: list[Message], broader_context: list[Message]
+    ) -> list[Message]:
+        by_id = {message.message_id: message for message in history}
+        by_id.update({message.message_id: message for message in broader_context})
+        return sorted(by_id.values(), key=KnowledgeBaseAnswers._message_timestamp)
+
+    async def resolve_conversation_context(
+        self, message: Message
+    ) -> ConversationResolution:
+        """Resolve a candidate follow-up for the router without generating an answer."""
+
+        my_jid = await self.whatsapp.get_my_jid()
+        stmt = (
+            select(Message)
+            .where(Message.chat_jid == message.chat_jid)
+            .order_by(desc(Message.timestamp))
+            .limit(self._recent_message_context_limit())
+        )
+        result = await self.session.exec(stmt)
+        history = list(reversed(list(result.all())))
+        return resolve_conversation_context(
+            message.text or "",
+            history,
+            current_sender=message.sender_jid,
+            bot_jid=my_jid.normalize_str(),
+            current_message_id=message.message_id,
         )

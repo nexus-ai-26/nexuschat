@@ -27,7 +27,7 @@ async def main():
         datefmt="%Y-%m-%d %H:%M:%S",
         level=logging.DEBUG,
     )
-    logfire.configure()
+    logfire.configure(send_to_logfire=False)
     logfire.instrument_pydantic_ai()
     logfire.instrument_httpx(capture_all=True)
     logfire.instrument_system_metrics()

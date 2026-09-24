@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -5,7 +6,6 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
 from sqlmodel import desc, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
@@ -15,12 +15,13 @@ from handler.knowledge_base_answers import KnowledgeBaseAnswers
 from models import Message
 from services.prompt_manager import prompt_manager
 from utils.chat_text import chat2text
-from utils.llm_provider import configured_model, run_with_provider_fallback
+from utils.llm_provider import ProviderFallbackError, run_with_provider_fallback
 from utils.opt_out import get_opt_out_map
 from whatsapp import WhatsAppClient
 from whatsapp.jid import parse_jid
+from .auto_reply import is_programme_request, silent_message_reason
+from .conversation_context import is_contextual_follow_up_candidate
 
-from .auto_reply import is_clear_banter
 from .base_handler import BaseHandler
 
 # Creating an object
@@ -34,18 +35,30 @@ NEXUS_INTRO = (
     "I can point out obvious filler such as Lorem ipsum. I can't reliably tell whether "
     "a message was AI-generated just by reading it, and I won't pretend otherwise."
 )
+BOT_FIXED_REPLY = "I'm Nexus, the UniPods METI AI programme assistant. Ask me about sessions, deadlines, MIT, Wadhwani or links."
+_BOT_QUESTION_RE = re.compile(
+    r"^\s*(?:@\S+\s+)*(?:who\s+are\s+you|are\s+you\s+(?:a\s+)?bot|"
+    r"what\s+can\s+you\s+do)\s*[?!.,]*\s*$",
+    re.IGNORECASE,
+)
 
 
 _CONTENT_QUESTION_RE = re.compile(
-    r"\b(?:quel|quelle|quels|quelles|quand|comment|pourquoi|qui|quoi|"
-    r"pouvez|peut|aidez|svp|inscription)\b",
+    r"\b(?:what|when|where|how|why|who|can|does|is|help|please|give|send|"
+    r"share|forward|need|recap|summary|summarize|happened|quel|quelle|"
+    r"quels|quelles|quand|comment|pourquoi|qui|quoi|pouvez|peut|aidez|"
+    r"svp|inscription)\b",
     re.IGNORECASE,
 )
 
 
 def _looks_like_content_question(text: str) -> bool:
     """Keep multilingual content questions out of the generic intent fallback."""
-    return "?" in text or bool(_CONTENT_QUESTION_RE.search(text))
+    return (
+        "?" in text
+        or bool(_CONTENT_QUESTION_RE.search(text))
+        or is_programme_request(text)
+    )
 
 
 class IntentEnum(str, Enum):
@@ -81,29 +94,104 @@ class Router(BaseHandler):
 
     async def __call__(self, message: Message):
         if not message.text:
+            logger.info("reply skipped chat=%s reason=no text", message.chat_jid)
             return
 
-        if is_clear_banter(message.text):
+        if _BOT_QUESTION_RE.fullmatch(message.text):
             await self.send_message(
                 message.chat_jid,
-                "😄 I’m filing that under *excellent banter*. Ask me a real question when you’re ready!",
+                BOT_FIXED_REPLY,
+                in_reply_to=message.message_id,
             )
             return
 
-        if _looks_like_content_question(message.text):
-            await self.ask_knowledge_base(message)
+        if not message.chat_jid.endswith("@g.us"):
+            import re as _re
+            import time as _time
+
+            _text = (message.text or "").strip()
+            if _re.fullmatch(
+                r"(?i)(?:hi+|hello+|hey+|hola|bonjour|salut|greetings|yo|good\s+(?:morning|afternoon|evening|day))(?:\s+(?:there|all|everyone|nexus|bot))?[\W_]*",
+                _text,
+            ):
+                await self.send_message(
+                    message.chat_jid,
+                    "Hi \U0001f44b I'm the UniPods METI AI programme assistant, Nexus bot. Ask me anything about the programme \u2014 sessions, deadlines, MIT, Wadhwani, links \u2014 and I'll help.",
+                    in_reply_to=message.message_id,
+                )
+                return
+            if _re.fullmatch(
+                r"(?i)(?:thanks?|thank\s+you|thx|merci)(?:\s+(?:so\s+much|a\s+lot|nexus|bot))?[\W_]*",
+                _text,
+            ):
+                await self.send_message(
+                    message.chat_jid,
+                    "You're welcome! Let me know if you need anything else about the programme.",
+                    in_reply_to=message.message_id,
+                )
+                return
+            if silent_message_reason(
+                message.text
+            ) and not is_contextual_follow_up_candidate(message.text):
+                _seen = globals().setdefault("_DM_NUDGE_AT", {})
+                _now = _time.monotonic()
+                if _now - _seen.get(message.chat_jid, -1e9) > 300:
+                    _seen[message.chat_jid] = _now
+                    await self.send_message(
+                        message.chat_jid,
+                        "I'm here to help with the UniPods METI programme. Ask me about sessions, deadlines, MIT, Wadhwani, the hackathon or links, and I'll answer right away.",
+                        in_reply_to=message.message_id,
+                    )
+                return
+        if is_contextual_follow_up_candidate(message.text):
+            try:
+                resolution = await self.ask_knowledge_base.resolve_conversation_context(
+                    message
+                )
+            except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+                logger.warning(
+                    "contextual follow-up resolution skipped chat=%s message=%s error=%s",
+                    message.chat_jid,
+                    message.message_id,
+                    type(error).__name__,
+                )
+                resolution = None
+            if resolution is not None and resolution.is_follow_up:
+                await self.ask_knowledge_base(message)
+                return
+        reason = silent_message_reason(message.text)
+        if reason:
+            logger.info(
+                "reply skipped chat=%s message=%s reason=%s",
+                message.chat_jid,
+                message.message_id,
+                reason,
+            )
             return
 
-        route = await self._route(message.text)
-        match route:
-            case IntentEnum.summarize:
-                await self.summarize(message)
-            case IntentEnum.ask_question:
+        try:
+            if _looks_like_content_question(message.text):
                 await self.ask_knowledge_base(message)
-            case IntentEnum.about:
-                await self.about(message)
-            case IntentEnum.other:
-                await self.default_response(message)
+                return
+
+            route = await self._route(message.text)
+            match route:
+                case IntentEnum.ask_question:
+                    await self.ask_knowledge_base(message)
+                case IntentEnum.summarize | IntentEnum.about | IntentEnum.other:
+                    logger.info(
+                        "reply skipped chat=%s message=%s reason=not grounded programme answer intent=%s",
+                        message.chat_jid,
+                        message.message_id,
+                        route.value,
+                    )
+        except (ProviderFallbackError, asyncio.TimeoutError, TimeoutError) as error:
+            logger.warning(
+                "reply skipped chat=%s message=%s reason=provider failure error=%s",
+                message.chat_jid,
+                message.message_id,
+                type(error).__name__,
+            )
 
     async def _route(self, message: str) -> IntentEnum:
         result = await run_with_provider_fallback(
@@ -115,6 +203,12 @@ class Router(BaseHandler):
         return result.output.intent
 
     async def summarize(self, message: Message):
+        logger.info(
+            "reply skipped chat=%s message=%s reason=summarization is not a programme question",
+            message.chat_jid,
+            message.message_id,
+        )
+        return
         time_24_hours_ago = datetime.now() - timedelta(hours=24)
         stmt = (
             select(Message)
@@ -130,35 +224,37 @@ class Router(BaseHandler):
         all_jids = {m.sender_jid for m in messages}
         all_jids.add(message.sender_jid)
         opt_out_map = await get_opt_out_map(self.session, list(all_jids))
-
-        agent = Agent(
-            model=configured_model(self.settings),
-            system_prompt=prompt_manager.render("summarize.j2"),
-            output_type=str,
-        )
+        # The summary provider must not run while this session owns a DB connection.
+        await self.session.commit()
 
         sender_user = parse_jid(message.sender_jid).user
         sender_display = opt_out_map.get(sender_user, f"@{sender_user}")
 
-        response = await agent.run(
-            f"{sender_display}: {message.text}\n\n # History:\n {chat2text(list(messages), opt_out_map)}"
+        result = await run_with_provider_fallback(
+            self.settings,
+            system_prompt=prompt_manager.render("summarize.j2"),
+            prompt=(
+                f"{sender_display}: {message.text}\n\n # History:\n "
+                f"{chat2text(list(messages), opt_out_map)}"
+            ),
+            output_type=str,
         )
         await self.send_message(
             message.chat_jid,
-            response.output,
-            # in_reply_to=message.message_id,
+            result.output,
+            in_reply_to=message.message_id,
         )
 
     async def about(self, message):
-        await self.send_message(
+        logger.info(
+            "reply skipped chat=%s message=%s reason=about request is not fixed identity question",
             message.chat_jid,
-            NEXUS_INTRO,
-            # in_reply_to=message.message_id,
+            message.message_id,
         )
 
     async def default_response(self, message):
-        await self.send_message(
+        logger.info(
+            "reply skipped chat=%s message=%s reason=not a programme question",
             message.chat_jid,
-            "I'm sorry, but I dont think this is something I can help with right now 😅.\n I can help catch up on the chat messages or answer questions based on the group's knowledge.",
-            # in_reply_to=message.message_id,
+            message.message_id,
         )

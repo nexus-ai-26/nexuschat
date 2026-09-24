@@ -1,4 +1,5 @@
 from collections import Counter
+from collections.abc import Mapping
 from typing import List
 
 from models import Message, Reaction
@@ -21,13 +22,20 @@ def render_reactions(reactions: List[Reaction]) -> str:
     )
 
 
-def chat2text(history: List[Message], opt_out_map: dict[str, str]) -> str:
+def chat2text(
+    history: List[Message],
+    opt_out_map: dict[str, str],
+    trusted_names: Mapping[str, str] | None = None,
+) -> str:
     lines = []
     for message in history:
         sender_jid = parse_jid(message.sender_jid)
         sender_user = sender_jid.user
+        normalized_sender = message.sender_jid
         if sender_user in opt_out_map:
             sender_display = opt_out_map[sender_user]
+        elif trusted_names and normalized_sender in trusted_names:
+            sender_display = trusted_names[normalized_sender]
         else:
             sender_display = f"@{sender_user}"
 

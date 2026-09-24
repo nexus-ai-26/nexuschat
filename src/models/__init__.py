@@ -5,6 +5,10 @@ from .sender import Sender, BaseSender
 from .reaction import Reaction, BaseReaction
 from .upsert import upsert, bulk_upsert
 from .opt_out import OptOut
+from .catchup_attempt import CatchupAttempt
+from .dm_greeting import DMGreeting
+from .group_member_permission import GroupMemberPermission
+from .group_schedule import GroupSchedule
 
 __all__ = [
     "Group",
@@ -20,4 +24,8 @@ __all__ = [
     "KBTopic",
     "KBTopicCreate",
     "OptOut",
+    "CatchupAttempt",
+    "DMGreeting",
+    "GroupMemberPermission",
+    "GroupSchedule",
 ]

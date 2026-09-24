@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from config import Settings
 from handler.auto_reply import auto_reply_limiter
-from handler.escalation import offer_escalation, reset_pending_escalations
 from gowa_sdk.webhooks import WebhookEnvelope
-from models import Group, Message
-from handler import MessageHandler
+from sqlalchemy.exc import IntegrityError
+from models import DMGreeting, Group, Message
+from handler import DM_OPENING, MessageHandler
 from test_utils.mock_session import AsyncSessionMock
 from whatsapp import SendMessageRequest
 from whatsapp.jid import JID
@@ -41,10 +41,8 @@ def mock_settings():
 @pytest.fixture(autouse=True)
 def reset_auto_reply_state():
     auto_reply_limiter.reset()
-    reset_pending_escalations()
     yield
     auto_reply_limiter.reset()
-    reset_pending_escalations()
 
 
 @pytest.mark.asyncio
@@ -266,6 +264,7 @@ async def test_managed_group_mention_uses_router(
     mock_embedding_client: AsyncMock,
     mock_settings: Mock,
 ):
+    mock_settings.active_groups = ["g@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
     )
@@ -290,6 +289,7 @@ async def test_managed_group_without_mention_uses_auto_reply(
     mock_embedding_client: AsyncMock,
     mock_settings: Mock,
 ):
+    mock_settings.active_groups = ["g@g.us"]
     mock_settings.auto_reply_groups = ["g@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
@@ -305,6 +305,31 @@ async def test_managed_group_without_mention_uses_auto_reply(
     await handler(_group_payload("auto-1", test_message.text or ""))
 
     handler.router.assert_not_awaited()
+    handler.router.ask_knowledge_base.assert_awaited_once_with(
+        test_message, auto_reply=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_contextual_follow_up_reaches_auto_reply_path(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    mock_settings.active_groups = ["g@g.us"]
+    mock_settings.auto_reply_groups = ["g@g.us"]
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    handler.router = AsyncMock()
+    handler.router.ask_knowledge_base = AsyncMock(return_value=True)
+
+    test_message = _managed_group_message("auto-follow-up-1", "In details")
+    handler.store_message = AsyncMock(return_value=test_message)
+
+    await handler(_group_payload("auto-follow-up-1", test_message.text or ""))
+
     handler.router.ask_knowledge_base.assert_awaited_once_with(
         test_message, auto_reply=True
     )
@@ -462,6 +487,7 @@ async def test_per_user_rate_limit_is_enforced(
     mock_embedding_client: AsyncMock,
     mock_settings: Mock,
 ):
+    mock_settings.active_groups = ["g@g.us"]
     mock_settings.auto_reply_groups = ["g@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
@@ -491,6 +517,7 @@ async def test_private_chat_uses_the_full_router_pipeline(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
     )
     handler.router = AsyncMock()
+    handler.send_message = AsyncMock()
 
     private_message = Message(
         message_id="private-1",
@@ -521,7 +548,7 @@ async def test_private_chat_uses_the_full_router_pipeline(
 
 
 @pytest.mark.asyncio
-async def test_escalation_status_question_never_reaches_router(
+async def test_private_chat_sends_durable_opening_once_then_routes_question(
     mock_session: AsyncSessionMock,
     mock_whatsapp: AsyncMock,
     mock_embedding_client: AsyncMock,
@@ -530,40 +557,98 @@ async def test_escalation_status_question_never_reaches_router(
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
     )
-    handler.send_message = AsyncMock()
-    original = Message(
-        message_id="pending-question",
-        chat_jid="user@s.whatsapp.net",
-        sender_jid="user@s.whatsapp.net",
-        text="Who can help?",
-    )
-    await offer_escalation(handler, original)
-
     handler.router = AsyncMock()
-    status_message = Message(
-        message_id="pending-status",
-        chat_jid="user@s.whatsapp.net",
-        sender_jid="user@s.whatsapp.net",
-        text="Did that get sent?",
+    handler.send_message = AsyncMock()
+    private_message = Message(
+        message_id="private-opening-1",
+        chat_jid="opening-user@s.whatsapp.net",
+        sender_jid="opening-user@s.whatsapp.net",
+        text="What are the deadlines?",
+        timestamp=datetime.now(UTC),
     )
-    handler.store_message = AsyncMock(return_value=status_message)
+    handler.store_message = AsyncMock(return_value=private_message)
+    mock_session.get = AsyncMock(
+        side_effect=[None, DMGreeting(sender_jid=private_message.sender_jid)]
+    )
     payload = WebhookEnvelope.model_validate(
         {
             "event": "message",
             "payload": {
-                "id": "pending-status",
-                "chat_id": "user@s.whatsapp.net",
-                "from": "user@s.whatsapp.net",
-                "timestamp": datetime.now(UTC),
-                "body": status_message.text,
+                "id": private_message.message_id,
+                "chat_id": private_message.chat_jid,
+                "from": private_message.sender_jid,
+                "body": private_message.text,
             },
         }
     )
 
     await handler(payload)
+    await handler(payload)
 
-    handler.router.assert_not_awaited()
-    assert "waiting" in handler.send_message.await_args_list[-1].args[1]
+    assert handler.send_message.await_args_list[0].args == (
+        private_message.chat_jid,
+        DM_OPENING,
+    )
+    assert handler.send_message.await_count == 1
+    assert handler.router.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_greeting_claim_does_not_send_second_opening(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    message = Message(
+        message_id="duplicate-opening-1",
+        chat_jid="duplicate-user@s.whatsapp.net",
+        sender_jid="duplicate-user@s.whatsapp.net",
+        text="hello",
+        timestamp=datetime.now(UTC),
+    )
+    original = type(
+        "DuplicateGreetingError",
+        (Exception,),
+        {"constraint_name": "dm_greeting_pkey"},
+    )("duplicate")
+    mock_session.get.return_value = None
+    mock_session.flush.side_effect = IntegrityError("insert", {}, original)
+    handler.send_message = AsyncMock()
+
+    claimed = await handler._send_private_opening_once(message)
+
+    assert claimed is False
+    handler.send_message.assert_not_awaited()
+    mock_session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_greeting_integrity_error_is_not_swallowed(
+    mock_session: AsyncSessionMock,
+    mock_whatsapp: AsyncMock,
+    mock_embedding_client: AsyncMock,
+    mock_settings: Mock,
+):
+    handler = MessageHandler(
+        mock_session, mock_whatsapp, mock_embedding_client, mock_settings
+    )
+    message = Message(
+        message_id="integrity-error-opening-1",
+        chat_jid="integrity-user@s.whatsapp.net",
+        sender_jid="integrity-user@s.whatsapp.net",
+        text="hello",
+        timestamp=datetime.now(UTC),
+    )
+    original = type("OtherConstraintError", (Exception,), {})("duplicate")
+    mock_session.get.return_value = None
+    mock_session.flush.side_effect = IntegrityError("insert", {}, original)
+
+    with pytest.raises(IntegrityError):
+        await handler._send_private_opening_once(message)
 
 
 @pytest.mark.asyncio
@@ -571,6 +656,7 @@ async def test_ai_disabled_still_stores_group_messages(
     mock_session, mock_whatsapp, mock_embedding_client, mock_settings
 ):
     mock_settings.ai_enabled = False
+    mock_settings.active_groups = ["123@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
     )

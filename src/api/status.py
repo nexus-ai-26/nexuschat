@@ -11,6 +11,12 @@ from .deps import get_db_async_session, get_whatsapp
 router = APIRouter()
 
 
+@router.get("/health")
+async def health() -> Dict[str, str]:
+    """Instant liveness probe; deliberately does not touch DB or WhatsApp."""
+    return {"status": "ok"}
+
+
 @router.get("/readiness")
 async def readiness() -> Dict[str, str]:
     """Simple readiness check that returns immediately."""
