@@ -67,3 +67,35 @@ class WhatsAppClient(GoWaClient):
         if not has_participant_data:
             return None
         return participant_count
+
+    async def is_group_admin(self, group_jid: str, member_jid: str) -> bool:
+        """Check live WhatsApp group-admin status without exposing participant data."""
+
+        response = await self.get_group_participants(group_jid)
+        results = getattr(response, "results", None)
+        data = getattr(results, "data", None) if results is not None else None
+        groups = data if isinstance(data, list) else [data]
+        normalized_member = member_jid.casefold()
+        for group in groups:
+            participants = getattr(group, "participants", None)
+            if isinstance(group, dict):
+                participants = group.get("participants")
+            for participant in participants or []:
+                if isinstance(participant, dict):
+                    candidate = participant.get("jid") or participant.get("JID")
+                    candidate = (
+                        candidate or participant.get("lid") or participant.get("LID")
+                    )
+                    is_admin = participant.get("is_admin") or participant.get("IsAdmin")
+                    is_super_admin = participant.get(
+                        "is_super_admin"
+                    ) or participant.get("IsSuperAdmin")
+                else:
+                    candidate = getattr(participant, "jid", None) or getattr(
+                        participant, "lid", None
+                    )
+                    is_admin = getattr(participant, "is_admin", False)
+                    is_super_admin = getattr(participant, "is_super_admin", False)
+                if candidate and str(candidate).casefold() == normalized_member:
+                    return bool(is_admin or is_super_admin)
+        return False

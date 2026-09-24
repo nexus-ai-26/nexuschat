@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import re
+from datetime import datetime, timezone
 from collections.abc import Awaitable
 from typing import Any, cast
 from urllib.parse import urlparse
@@ -25,7 +26,18 @@ from handler.router import Router
 from handler.whatsapp_group_link_spam import WhatsappGroupLinkSpamHandler
 from models import BaseGroup, DMGreeting, Group, Message, OptOut
 from services.document_ingestion import index_document
+from services.group_control import (
+    GroupCommand,
+    ParsedGroupCommand,
+    group_is_selected,
+    parse_group_command,
+    permission_allows,
+    set_group_paused,
+    set_group_selection,
+)
+from models import GroupMemberPermission
 from whatsapp import WhatsAppClient
+from whatsapp.jid import JIDParseError, normalize_jid
 
 from .base_handler import BaseHandler
 
@@ -58,6 +70,23 @@ class MessageHandler(BaseHandler):
         super().__init__(session, whatsapp, embedding_client)
 
     async def __call__(self, payload: WebhookEnvelope):
+        probe = self._probe_message(payload)
+        parsed_command = parse_group_command(probe.text if probe else None)
+        if probe and probe.group_jid and parsed_command:
+            await self._handle_group_command(probe, parsed_command)
+            return
+
+        if (
+            probe
+            and probe.group_jid
+            and not await self._group_processing_allowed(probe)
+        ):
+            logger.info(
+                "group processing skipped group=%s reason=unselected_or_paused",
+                probe.group_jid,
+            )
+            return
+
         message = await self.store_message(payload)
 
         # Persist immediately: a failure later in the handler must not roll
@@ -71,9 +100,6 @@ class MessageHandler(BaseHandler):
         auto_reply_groups = self._configured_auto_reply_groups()
         group_jid = message.group_jid
         auto_reply_group = bool(group_jid and group_jid in auto_reply_groups)
-
-        if auto_reply_group:
-            await self._ensure_active_group(message)
 
         if self._payload_from_me(payload) or bool(getattr(message, "from_me", False)):
             if auto_reply_group:
@@ -150,14 +176,18 @@ class MessageHandler(BaseHandler):
         if active_group:
             await self._ensure_active_group(message)
 
-        # Explicitly enabled groups may be mention-triggered without a managed DB flag.
         if (
-            message
-            and message.group
-            and not message.group.managed
-            and not auto_reply_group
-            and not active_group
+            message.group_jid
+            and message.group is not None
+            and not group_is_selected(message.group)
         ):
+            if active_group:
+                set_group_selection(message.group, True)
+                message.group.managed = True
+                await self.upsert(message.group)
+            else:
+                return
+        if message.group is not None and message.group.paused:
             return
 
         mentioned = message.has_mentioned(my_jid)
@@ -256,9 +286,178 @@ class MessageHandler(BaseHandler):
             group = await self.session.get(Group, message.group_jid)
             if group is None:
                 group = await self.upsert(
-                    Group(**BaseGroup(group_jid=message.group_jid).model_dump())
+                    Group(
+                        **BaseGroup(
+                            group_jid=message.group_jid,
+                            selected=True,
+                            managed=True,
+                        ).model_dump()
+                    )
                 )
+            elif not group_is_selected(group):
+                set_group_selection(group, True)
+                group.managed = True
+                await self.upsert(group)
             message.group = group
+
+    @staticmethod
+    def _probe_message(payload: WebhookEnvelope) -> Message | None:
+        if payload.event != "message":
+            return None
+        try:
+            return Message.from_webhook(payload)
+        except (AssertionError, ValueError):
+            return None
+
+    async def _group_processing_allowed(self, message: Message) -> bool:
+        if not message.group_jid:
+            return True
+        group = await self.session.get(Group, message.group_jid)
+        configured_selected = message.group_jid in self._configured_active_groups()
+        if group is None:
+            return configured_selected
+        if configured_selected and not group_is_selected(group):
+            set_group_selection(group, True)
+            group.managed = True
+            await self.upsert(group)
+            await self.session.commit()
+        if not group_is_selected(group) or group.paused:
+            return False
+
+        permission = await self.session.get(
+            GroupMemberPermission, (message.group_jid, message.sender_jid)
+        )
+        if permission is not None and not permission_allows(
+            group, permission, message.sender_jid
+        ):
+            # Administrators retain an override even when an explicit deny rule
+            # exists for their own member JID.
+            return await self._is_group_admin(message)
+        if group.member_policy == "deny":
+            is_admin = await self._is_group_admin(message)
+            return permission_allows(
+                group, permission, message.sender_jid, is_admin=is_admin
+            )
+        return True
+
+    async def _is_group_admin(self, message: Message) -> bool:
+        group = (
+            await self.session.get(Group, message.group_jid)
+            if message.group_jid
+            else None
+        )
+        if group and group.owner_jid == message.sender_jid:
+            return True
+        if not message.group_jid:
+            return False
+        try:
+            return await self.whatsapp.is_group_admin(
+                message.group_jid, message.sender_jid
+            )
+        except Exception:
+            logger.warning(
+                "group admin lookup failed group=%s error=bridge_unavailable",
+                message.group_jid,
+            )
+            return False
+
+    async def _handle_group_command(
+        self, message: Message, parsed: ParsedGroupCommand
+    ) -> None:
+        if not message.group_jid:
+            return
+        if not await self._is_group_admin(message):
+            await self.send_message(
+                message.chat_jid,
+                "Only a WhatsApp group administrator can change Nexus settings in this group.",
+                in_reply_to=message.message_id,
+            )
+            return
+
+        group = await self.session.get(Group, message.group_jid)
+        if group is None:
+            group = Group(
+                **BaseGroup(
+                    group_jid=message.group_jid,
+                    selected=parsed.command
+                    in {GroupCommand.select, GroupCommand.resume, GroupCommand.pause},
+                    managed=parsed.command
+                    in {GroupCommand.select, GroupCommand.resume, GroupCommand.pause},
+                ).model_dump()
+            )
+
+        command = parsed.command
+        if command in {GroupCommand.select, GroupCommand.unselect}:
+            set_group_selection(group, command == GroupCommand.select)
+            if command == GroupCommand.select:
+                group.resumed_at = datetime.now(timezone.utc)
+            await self.upsert(group)
+            await self.session.commit()
+            acknowledgement = (
+                "Nexus is enabled in this group."
+                if command == GroupCommand.select
+                else "Nexus is disabled in this group."
+            )
+        elif command in {GroupCommand.pause, GroupCommand.resume}:
+            set_group_selection(group, True)
+            set_group_paused(
+                group,
+                paused=command == GroupCommand.pause,
+                actor_jid=message.sender_jid,
+            )
+            await self.upsert(group)
+            await self.session.commit()
+            acknowledgement = (
+                "Nexus is paused in this group."
+                if command == GroupCommand.pause
+                else "Nexus is resumed in this group."
+            )
+        elif command in {GroupCommand.allow, GroupCommand.deny}:
+            if not parsed.argument:
+                await self.send_message(
+                    message.chat_jid,
+                    "Specify a member JID after /allow or /deny.",
+                    in_reply_to=message.message_id,
+                )
+                return
+            try:
+                member_jid = normalize_jid(parsed.argument)
+            except (JIDParseError, ValueError):
+                await self.send_message(
+                    message.chat_jid,
+                    "Use a valid WhatsApp member JID after /allow or /deny.",
+                    in_reply_to=message.message_id,
+                )
+                return
+            permission = GroupMemberPermission(
+                group_jid=message.group_jid,
+                member_jid=member_jid,
+                allowed=command == GroupCommand.allow,
+                updated_by=message.sender_jid,
+            )
+            await self.upsert(permission)
+            await self.session.commit()
+            acknowledgement = (
+                "That member is allowed to use Nexus in this group."
+                if command == GroupCommand.allow
+                else "That member is denied Nexus access in this group."
+            )
+        elif command in {GroupCommand.allow_all, GroupCommand.deny_all}:
+            group.member_policy = (
+                "allow" if command == GroupCommand.allow_all else "deny"
+            )
+            await self.upsert(group)
+            await self.session.commit()
+            acknowledgement = (
+                "Nexus now allows all group members by default."
+                if command == GroupCommand.allow_all
+                else "Nexus now requires an allow rule for group members."
+            )
+        else:
+            return
+        await self.send_message(
+            message.chat_jid, acknowledgement, in_reply_to=message.message_id
+        )
 
     @staticmethod
     def _payload_from_me(payload: WebhookEnvelope) -> bool:

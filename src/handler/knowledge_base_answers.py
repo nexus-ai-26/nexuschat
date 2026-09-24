@@ -45,6 +45,7 @@ from config.trusted_facts import (
     trusted_contacts_for_query,
 )
 from services.prompt_manager import prompt_manager
+from services.summary_timeframe import SummaryWindow, parse_summary_timeframe
 from services.document_ingestion import (
     document_topics_for_message,
     index_document,
@@ -153,13 +154,19 @@ class KnowledgeBaseAnswers(BaseHandler):
             group_jid=message.group_jid,
             bot_jid=bot_jid,
         )
+        summary_window = (
+            parse_summary_timeframe(message.text)
+            if resolution.retrieval_mode == RetrievalMode.summary
+            else None
+        )
         organizer_history = await self._recent_organizer_messages(
-            message, query_text=effective_query
+            message, query_text=effective_query, window=summary_window
         )
         broader_context = await self._recent_summary_messages(
             message,
             query_text=effective_query,
             bot_jid=bot_jid,
+            window=summary_window,
         )
 
         # Dynamic membership is answered only from live WhatsApp state.  If the
@@ -400,6 +407,7 @@ class KnowledgeBaseAnswers(BaseHandler):
         message: Message,
         *,
         query_text: str | None = None,
+        window: SummaryWindow | None = None,
     ) -> list[Message]:
         """Load recent organizer statements for recap/update questions.
 
@@ -429,12 +437,12 @@ class KnowledgeBaseAnswers(BaseHandler):
             )
             return []
 
-        window_days = self._summary_window_days(query)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+        summary_window = window or parse_summary_timeframe(query)
         stmt = (
             select(Message)
             .where(Message.group_jid == message.group_jid)
-            .where(Message.timestamp >= cutoff)
+            .where(Message.timestamp >= summary_window.start)
+            .where(Message.timestamp <= summary_window.end)
             .order_by(col(Message.timestamp))
             .limit(100)
         )
@@ -446,10 +454,10 @@ class KnowledgeBaseAnswers(BaseHandler):
         ]
         messages = self._deduplicate_messages(messages)
         logger.info(
-            "recap organizer context group=%s messages=%s window_days=%s",
+            "recap organizer context group=%s messages=%s window=%s",
             message.group_jid,
             len(messages),
-            window_days,
+            summary_window.label,
         )
         return messages
 
@@ -459,21 +467,21 @@ class KnowledgeBaseAnswers(BaseHandler):
         *,
         query_text: str,
         bot_jid: str,
+        window: SummaryWindow | None = None,
     ) -> list[Message]:
         """Load a broader chronological window only for recap-style questions."""
 
         if not message.group_jid or not _RECAP_RE.search(query_text):
             return []
 
-        cutoff = datetime.now(timezone.utc) - timedelta(
-            days=self._summary_window_days(query_text)
-        )
+        summary_window = window or parse_summary_timeframe(query_text)
         stmt = (
             select(Message)
             .where(Message.group_jid == message.group_jid)
-            .where(Message.timestamp >= cutoff)
+            .where(Message.timestamp >= summary_window.start)
+            .where(Message.timestamp <= summary_window.end)
             .order_by(col(Message.timestamp))
-            .limit(100)
+            .limit(200)
         )
         result = await self.session.exec(stmt)
         messages = list(result.all())
@@ -487,11 +495,8 @@ class KnowledgeBaseAnswers(BaseHandler):
 
     @staticmethod
     def _summary_window_days(query_text: str) -> int:
-        if re.search(r"\b(?:two\s+weeks?|14\s+days?|fortnight)\b", query_text, re.I):
-            return 14
-        if re.search(r"\b(?:week|7\s+days?)\b", query_text, re.I):
-            return 7
-        return 2
+        window = parse_summary_timeframe(query_text)
+        return max(1, (window.end - window.start).days)
 
     async def _quoted_document_results(self, message: Message):
         """Return only the quoted document's chunks, or mark an unreadable file."""
@@ -619,9 +624,9 @@ class KnowledgeBaseAnswers(BaseHandler):
         )
 
     def _recent_message_context_limit(self) -> int:
-        value = getattr(self.settings, "recent_message_context_limit", 30)
+        value = getattr(self.settings, "recent_message_context_limit", 20)
         if isinstance(value, bool) or not isinstance(value, int):
-            return 30
+            return 20
         return min(max(value, 1), 100)
 
     @staticmethod

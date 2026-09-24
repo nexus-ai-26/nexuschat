@@ -14,6 +14,7 @@ from dataclasses import dataclass
 class TrustedApplicationFact:
     name: str
     contact: str | None
+    email: str | None
     community_role: str
     programme_role: str
     responsibilities: tuple[str, ...]
@@ -23,17 +24,22 @@ class TrustedApplicationFact:
 
 TRUSTED_APPLICATION_FACTS: tuple[TrustedApplicationFact, ...] = (
     TrustedApplicationFact(
-        name="Diana",
+        name="Diane",
         contact="+250783188655",
+        email="unipods.regional@undp.org",
         community_role="community/group admin",
         programme_role="Programme Facilitator / Organizer",
-        responsibilities=("programme facilitation / organizer matters",),
-        when_to_contact="programme facilitation or organizer matters",
-        aliases=("diana",),
+        responsibilities=(
+            "team declarations and bot deployment",
+            "programme facilitation / organizer matters",
+        ),
+        when_to_contact="team declarations, bot deployment, or organizer matters",
+        aliases=("diane", "diana"),
     ),
     TrustedApplicationFact(
         name="Gift NTULI",
         contact="+263774094822",
+        email=None,
         community_role="community/group admin",
         programme_role="Programme Facilitator / Organizer",
         responsibilities=("Microsoft session leader",),
@@ -43,8 +49,9 @@ TRUSTED_APPLICATION_FACTS: tuple[TrustedApplicationFact, ...] = (
     TrustedApplicationFact(
         name="Munira UNDP",
         contact="+250786387244",
+        email=None,
         community_role="community/group admin",
-        programme_role="Organizer",
+        programme_role="Programme Facilitator / Organizer",
         responsibilities=(
             "MIT Course-related issues, including invitation-link/course support",
         ),
@@ -54,10 +61,11 @@ TRUSTED_APPLICATION_FACTS: tuple[TrustedApplicationFact, ...] = (
     TrustedApplicationFact(
         name="Jeovaire Umukundwa",
         contact=None,
+        email=None,
         community_role="community/group admin",
         programme_role="Programme Facilitator / Organizer",
-        responsibilities=("Microsoft session leader - 2",),
-        when_to_contact="Microsoft session questions for session 2",
+        responsibilities=("Microsoft Session leader (secondary)",),
+        when_to_contact="Microsoft session questions, especially secondary support",
         aliases=("jeovaire", "umukundwa"),
     ),
 )
@@ -71,6 +79,10 @@ _ADMIN_QUERY_RE = re.compile(
 _MIT_RE = re.compile(r"\b(?:mit|course|invitation|invite)\b", re.IGNORECASE)
 _MICROSOFT_RE = re.compile(
     r"\b(?:microsoft|session\s+leader|session\s+2)\b", re.IGNORECASE
+)
+_DIANE_RE = re.compile(
+    r"\b(?:team\s+declaration|team\s+declarations|deployment|deploy(?:ing|ment)?)\b",
+    re.IGNORECASE,
 )
 _CONTACT_REQUEST_RE = re.compile(
     r"\b(?:phone|number|contact|call|whatsapp)\b", re.IGNORECASE
@@ -93,6 +105,8 @@ def relevant_trusted_application_facts(
     }
     if mentioned_names:
         names = mentioned_names
+    elif _DIANE_RE.search(text):
+        names = {"Diane"}
     elif _MIT_RE.search(text):
         names = {"Munira UNDP"}
     elif _MICROSOFT_RE.search(text):
@@ -124,6 +138,8 @@ def format_trusted_application_facts(
         )
         if include_contacts and fact.contact:
             line += f" Trusted contact: {fact.contact}."
+        if include_contacts and fact.email:
+            line += f" Trusted email: {fact.email}."
         lines.append(line)
     return "\n".join(lines)
 

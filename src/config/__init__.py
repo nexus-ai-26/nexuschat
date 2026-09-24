@@ -123,8 +123,9 @@ class Settings(BaseSettings):
     catchup_delay_seconds: float = 2.5
     catchup_start_delay_seconds: float = 30.0
     catchup_admin_secret: str | None = None
+    dashboard_admin_secret: str | None = None
     other_bot_jids: Annotated[list[str], NoDecode] = []
-    recent_message_context_limit: int = Field(default=30, ge=1, le=100)
+    recent_message_context_limit: int = Field(default=20, ge=1, le=100)
     max_reply_chars: int = Field(default=5000, ge=5000)
 
     @field_validator("qa_testers")

@@ -5,7 +5,7 @@ from typing import Dict, List
 
 from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_ai.agent import AgentRunResult
-from sqlmodel import desc, or_, select
+from sqlmodel import col, desc, or_, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 from voyageai.client_async import AsyncClient
 
@@ -13,6 +13,7 @@ from config import Settings, get_settings
 from models import KBTopicCreate, Group, Message
 from models.knowledge_base_topic import KBTopic
 from models.upsert import bulk_upsert
+from services.group_control import group_is_selected, set_group_selection
 from services.prompt_manager import prompt_manager
 from utils.voyage_embed_text import voyage_embed_text
 from utils.llm_provider import run_with_provider_fallback
@@ -312,11 +313,25 @@ class topicsLoader:
     ):
         if active_group_jids is None:
             active_group_jids = get_settings().active_groups
-        group_filter = [Group.managed == True]  # noqa: E712
         if active_group_jids:
-            group_filter.append(Group.group_jid.in_(active_group_jids))
-        groups = await session.exec(select(Group).where(or_(*group_filter)))
-        group_rows = list(groups.all())
+            groups = await session.exec(
+                select(Group).where(
+                    or_(
+                        Group.managed == True,  # noqa: E712
+                        col(Group.group_jid).in_(active_group_jids),
+                    )
+                )
+            )
+        else:
+            groups = await session.exec(select(Group).where(Group.managed == True))  # noqa: E712
+        group_rows = []
+        for group in groups.all():
+            if group.group_jid in active_group_jids and not group_is_selected(group):
+                set_group_selection(group, True)
+            if (
+                group_is_selected(group) or group.group_jid in active_group_jids
+            ) and not group.paused:
+                group_rows.append(group)
         await session.commit()
         for group in group_rows:
             await self.load_topics(session, group, embedding_client, whatsapp)

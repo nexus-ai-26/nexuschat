@@ -8,6 +8,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from config import Settings
 from models import Group, Message
+from services.group_control import group_is_selected
 from services.prompt_manager import prompt_manager
 from utils.chat_text import chat2text
 from utils.opt_out import get_opt_out_map
@@ -36,6 +37,8 @@ async def summarize(
 async def summarize_and_send_to_group(
     settings: Settings, session, whatsapp: WhatsAppClient, group: Group
 ):
+    if not group_is_selected(group) or group.paused:
+        return
     resp = await session.exec(
         select(Message)
         .where(Message.group_jid == group.group_jid)
@@ -63,7 +66,11 @@ async def summarize_and_send_to_group(
         )
 
         # Send the summary to the community groups
-        community_groups = await group.get_related_community_groups(session)
+        community_groups = [
+            community_group
+            for community_group in await group.get_related_community_groups(session)
+            if group_is_selected(community_group) and not community_group.paused
+        ]
         for cg in community_groups:
             await whatsapp.send_message(
                 SendMessageRequest(phone=cg.group_jid, message=result.output)
@@ -82,10 +89,17 @@ async def summarize_and_send_to_group(
 async def summarize_and_send_to_groups(
     settings: Settings, session: AsyncSession, whatsapp: WhatsAppClient
 ):
-    groups = await session.exec(select(Group).where(Group.managed == True))  # noqa: E712 https://stackoverflow.com/a/18998106
+    groups = await session.exec(
+        select(Group).where(
+            (
+                (Group.managed == True) | (Group.selected == True)  # noqa: E712
+            )
+        )
+    )
     tasks = [
         summarize_and_send_to_group(settings, session, whatsapp, group)
         for group in list(groups.all())
+        if group_is_selected(group) and not group.paused
     ]
     errs = await asyncio.gather(*tasks, return_exceptions=True)
     for e in errs:

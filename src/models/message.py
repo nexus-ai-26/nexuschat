@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 from typing import TYPE_CHECKING, Any, List, Optional
 
 from pydantic import field_validator, model_validator
@@ -59,7 +60,9 @@ class BaseMessage(SQLModel):
 
         if not self.text:
             return False
-        return f"@{jid.user}" in self.text
+        return f"@{jid.user}" in self.text or bool(
+            re.search(r"@\s*nexus\b", self.text, re.IGNORECASE)
+        )
 
 
 class Message(BaseMessage, table=True):

@@ -30,7 +30,20 @@ class BaseGroup(SQLModel):
     owner_jid: Optional[str] = Field(
         max_length=255, foreign_key="sender.jid", nullable=True, default=None
     )
+    # ``managed`` is the legacy selection flag.  ``selected`` is the explicit
+    # control-plane flag introduced for privacy-aware group processing; existing
+    # managed groups remain selected through the compatibility helper.
+    selected: bool = Field(default=False, nullable=False)
     managed: bool = Field(default=False)
+    paused: bool = Field(default=False, nullable=False)
+    paused_by: Optional[str] = Field(default=None, max_length=255)
+    paused_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    resumed_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    member_policy: str = Field(default="allow", max_length=16, nullable=False)
     notify_on_spam: bool = Field(default=False)
     community_keys: Optional[List[str]] = Field(
         default=None, sa_column=Column(ARRAY(String))

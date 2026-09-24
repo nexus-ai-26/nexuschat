@@ -182,11 +182,11 @@ def test_gemini_model_default_and_environment_override(monkeypatch: pytest.Monke
     assert configured.gemini_model == "gemini-test-model"
 
 
-def test_recent_message_context_limit_defaults_to_thirty_and_accepts_one_hundred():
+def test_recent_message_context_limit_defaults_to_twenty_and_accepts_one_hundred():
     default = build(model_name="test")
     maximum = build(model_name="test", recent_message_context_limit=100)
 
-    assert default.recent_message_context_limit == 30
+    assert default.recent_message_context_limit == 20
     assert maximum.recent_message_context_limit == 100
 
 

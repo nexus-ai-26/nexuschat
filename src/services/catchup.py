@@ -16,6 +16,7 @@ from sqlmodel import select
 from config import Settings
 from handler.base_handler import BaseHandler
 from models import CatchupAttempt, Group, Message
+from services.group_control import group_is_selected
 from services.webhook_processing import process_webhook_message
 from utils.llm_provider import provider_rate_limit_recently
 from whatsapp import WhatsAppClient
@@ -223,10 +224,19 @@ class CatchupService:
         return self.app.state.settings
 
     async def _served_groups(self, session) -> list[str]:
-        configured = set(self.settings.active_groups or [])
-        configured.update(self.settings.auto_reply_groups or [])
-        result = await session.exec(select(Group).where(Group.managed == True))  # noqa: E712
-        configured.update(group.group_jid for group in result.all())
+        configured: set[str] = set()
+        result = await session.exec(
+            select(Group).where(
+                (
+                    (Group.managed == True) | (Group.selected == True)  # noqa: E712
+                )
+            )
+        )
+        configured.update(
+            group.group_jid
+            for group in result.all()
+            if group_is_selected(group) and not group.paused
+        )
         return sorted(configured)
 
     async def _bridge_history(

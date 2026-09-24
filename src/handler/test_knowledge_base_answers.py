@@ -238,6 +238,14 @@ def test_recent_context_limit_is_bounded_for_non_settings_test_doubles():
     assert handler._recent_message_context_limit() == 100
 
 
+def test_recent_context_default_is_twenty_messages():
+    handler = KnowledgeBaseAnswers(
+        AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()
+    )
+
+    assert handler._recent_message_context_limit() == 20
+
+
 def test_recent_context_preserves_speculation_and_correction_qualifiers():
     handler = KnowledgeBaseAnswers(
         AsyncSessionMock(), AsyncMock(), AsyncMock(), SimpleNamespace()

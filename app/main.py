@@ -12,6 +12,7 @@ import logfire
 
 from api import (
     catchup,
+    control,
     load_new_kbtopics_api,
     status,
     summarize_and_send_to_group_api,
@@ -26,10 +27,13 @@ from load_new_kbtopics import topicsLoader
 from services.webhook_processing import process_webhook_message
 from services.webhook_queue import PerChatQueue
 from services.catchup import run_startup_catchup
+from services.group_scheduler import claim_due_schedules
+from summarize_and_send_to_groups import summarize_and_send_to_group
 
 
 logger = logging.getLogger(__name__)
 KB_TOPIC_SYNC_INTERVAL_SECONDS = 15 * 60
+GROUP_SCHEDULER_INTERVAL_SECONDS = 60
 
 
 async def sync_kb_topics_periodically(
@@ -50,6 +54,25 @@ async def sync_kb_topics_periodically(
                 type(error).__name__,
             )
         await asyncio.sleep(KB_TOPIC_SYNC_INTERVAL_SECONDS)
+
+
+async def run_group_scheduler(app) -> None:
+    """Claim and run persisted summaries without duplicate worker execution."""
+
+    while True:
+        try:
+            async with app.state.background_semaphore:
+                async with app.state.async_session() as session:
+                    groups = await claim_due_schedules(session)
+                    for group in groups:
+                        await summarize_and_send_to_group(
+                            app.state.settings, session, app.state.whatsapp, group
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error("Group scheduler cycle failed error=%s", type(error).__name__)
+        await asyncio.sleep(GROUP_SCHEDULER_INTERVAL_SECONDS)
 
 
 @asynccontextmanager
@@ -111,8 +134,12 @@ async def lifespan(app: FastAPI):
         settings.background_concurrency_limit
     )
     app.state.catchup_lock = asyncio.Lock()
+
+    async def process_queued_webhook(payload: WebhookEnvelope) -> None:
+        await process_webhook_message(app, payload)
+
     webhook_queue: PerChatQueue[WebhookEnvelope] = PerChatQueue(
-        lambda payload: process_webhook_message(app, payload),
+        process_queued_webhook,
         maxsize=settings.webhook_queue_maxsize,
     )
     app.state.webhook_queue = webhook_queue
@@ -128,6 +155,7 @@ async def lifespan(app: FastAPI):
         )
     )
     startup_catchup_task = asyncio.create_task(run_startup_catchup(app))
+    group_scheduler_task = asyncio.create_task(run_group_scheduler(app))
     logger.info(
         "Periodic KB topic sync started interval_seconds=%s",
         KB_TOPIC_SYNC_INTERVAL_SECONDS,
@@ -142,6 +170,8 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(kb_topic_sync_task, return_exceptions=True)
         startup_catchup_task.cancel()
         await asyncio.gather(startup_catchup_task, return_exceptions=True)
+        group_scheduler_task.cancel()
+        await asyncio.gather(group_scheduler_task, return_exceptions=True)
         await app.state.whatsapp.close()
         await engine.dispose()
 
@@ -168,6 +198,7 @@ app.include_router(status.router)
 app.include_router(summarize_and_send_to_group_api.router)
 app.include_router(load_new_kbtopics_api.router)
 app.include_router(catchup.router)
+app.include_router(control.router)
 
 if __name__ == "__main__":
     import uvicorn

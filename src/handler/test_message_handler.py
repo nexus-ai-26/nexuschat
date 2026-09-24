@@ -264,6 +264,7 @@ async def test_managed_group_mention_uses_router(
     mock_embedding_client: AsyncMock,
     mock_settings: Mock,
 ):
+    mock_settings.active_groups = ["g@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
     )
@@ -288,6 +289,7 @@ async def test_managed_group_without_mention_uses_auto_reply(
     mock_embedding_client: AsyncMock,
     mock_settings: Mock,
 ):
+    mock_settings.active_groups = ["g@g.us"]
     mock_settings.auto_reply_groups = ["g@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
@@ -315,6 +317,7 @@ async def test_group_contextual_follow_up_reaches_auto_reply_path(
     mock_embedding_client: AsyncMock,
     mock_settings: Mock,
 ):
+    mock_settings.active_groups = ["g@g.us"]
     mock_settings.auto_reply_groups = ["g@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
@@ -484,6 +487,7 @@ async def test_per_user_rate_limit_is_enforced(
     mock_embedding_client: AsyncMock,
     mock_settings: Mock,
 ):
+    mock_settings.active_groups = ["g@g.us"]
     mock_settings.auto_reply_groups = ["g@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
@@ -652,6 +656,7 @@ async def test_ai_disabled_still_stores_group_messages(
     mock_session, mock_whatsapp, mock_embedding_client, mock_settings
 ):
     mock_settings.ai_enabled = False
+    mock_settings.active_groups = ["123@g.us"]
     handler = MessageHandler(
         mock_session, mock_whatsapp, mock_embedding_client, mock_settings
     )
